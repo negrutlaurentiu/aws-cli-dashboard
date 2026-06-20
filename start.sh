@@ -25,6 +25,9 @@ if [ ! -f "$DIR/config/accounts.json" ]; then
   echo "→ Created config/accounts.json (from the example). Add accounts from the UI."
 fi
 
+# Pre-create the CSRF app token so concurrent workers don't race to generate one.
+AWSDASH_BOOT="$DIR/src/bootstrap.php" php -r 'require getenv("AWSDASH_BOOT"); (new AwsDash\App())->store->appToken();' >/dev/null 2>&1 || true
+
 URL="http://$HOST:$PORT"
 echo ""
 echo "  AWS CLI Dashboard"
@@ -39,4 +42,6 @@ if command -v open >/dev/null 2>&1; then
   ( sleep 1; open "$URL" >/dev/null 2>&1 || true ) &
 fi
 
+# Multiple workers so streaming a file or running an S3 download doesn't block the UI.
+export PHP_CLI_SERVER_WORKERS="${PHP_CLI_SERVER_WORKERS:-8}"
 exec php -S "$HOST:$PORT" -t "$DIR/public" "$DIR/public/router.php"

@@ -63,6 +63,35 @@ try {
             setDefault($app);
             break;
 
+        case $method === 'GET' && $path === '/s3':
+            renderS3($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/s3/buckets':
+            $app->assertCsrf();
+            s3Buckets($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/s3/list':
+            $app->assertCsrf();
+            s3List($app);
+            break;
+
+        case $method === 'GET' && $path === '/api/s3/object':
+            $app->assertCsrfQuery();
+            s3Object($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/s3/download':
+            $app->assertCsrf();
+            s3Download($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/s3/download-status':
+            $app->assertCsrf();
+            s3DownloadStatus($app);
+            break;
+
         default:
             $app->fail(404, 'Not found: ' . $method . ' ' . $path);
     }
@@ -270,7 +299,20 @@ function maskKey(string $key): string
 
 function renderPage(App $app): never
 {
-    $template = file_get_contents(__DIR__ . '/../src/page.html');
+    renderTemplate($app, 'page.html', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:");
+}
+
+function renderS3(App $app): never
+{
+    // The S3 viewer embeds object bytes via same-origin <img>/<iframe>; allow those, plus
+    // blob: for client-built previews. The object responses themselves carry their own
+    // strict, script-free CSP (see s3Object).
+    renderTemplate($app, 's3.html', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self'; object-src 'self'");
+}
+
+function renderTemplate(App $app, string $file, string $csp): never
+{
+    $template = file_get_contents(__DIR__ . '/../src/' . $file);
     if ($template === false) {
         http_response_code(500);
         echo 'Template missing.';
@@ -285,8 +327,133 @@ function renderPage(App $app): never
     header('Cache-Control: no-store');
     header('X-Content-Type-Options: nosniff');
     header('X-Frame-Options: DENY');
-    header("Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:");
+    header('Content-Security-Policy: ' . $csp);
     header('Referrer-Policy: no-referrer');
     echo $html;
     exit;
+}
+
+// ---- S3 browser ------------------------------------------------------------
+
+function s3Buckets(App $app): void
+{
+    $profile = trim((string) ($app->jsonBody()['profile'] ?? ''));
+    if ($profile === '') {
+        $app->fail(400, 'Missing profile.');
+    }
+    $app->json(['ok' => true, 'buckets' => (new S3($app->awsBin))->listBuckets($profile)]);
+}
+
+function s3List(App $app): void
+{
+    $b = $app->jsonBody();
+    $profile = trim((string) ($b['profile'] ?? ''));
+    $bucket = trim((string) ($b['bucket'] ?? ''));
+    $prefix = (string) ($b['prefix'] ?? '');
+    if ($profile === '' || $bucket === '') {
+        $app->fail(400, 'Missing profile or bucket.');
+    }
+    $app->json(['ok' => true] + (new S3($app->awsBin))->listObjects($profile, $bucket, $prefix));
+}
+
+/** Stream a single object with strict, script-free headers (view inline or download). */
+function s3Object(App $app): void
+{
+    $profile = trim((string) ($_GET['profile'] ?? ''));
+    $bucket = trim((string) ($_GET['bucket'] ?? ''));
+    $key = (string) ($_GET['key'] ?? '');
+    $dl = (string) ($_GET['dl'] ?? '') === '1';
+    if ($profile === '' || $bucket === '' || $key === '') {
+        http_response_code(400);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Missing parameters.';
+        return;
+    }
+
+    $s3 = new S3($app->awsBin);
+    try {
+        $head = $s3->headObject($profile, $bucket, $key);
+    } catch (\Throwable $e) {
+        http_response_code(404);
+        header('Content-Type: text/plain; charset=utf-8');
+        header('X-Content-Type-Options: nosniff');
+        echo 'Cannot access object: ' . $e->getMessage();
+        return;
+    }
+
+    [$mime, $inlineSafe] = s3Mime($key);
+    $disposition = (!$dl && $inlineSafe) ? 'inline' : 'attachment';
+    $ctype = ($disposition === 'inline') ? $mime : 'application/octet-stream';
+
+    $base = $key;
+    $slash = strrpos($base, '/');
+    if ($slash !== false) {
+        $base = substr($base, $slash + 1);
+    }
+    $filename = preg_replace('/[\r\n"\\\\]+/', '_', $base);
+
+    header('Content-Type: ' . $ctype);
+    header('Content-Disposition: ' . $disposition . '; filename="' . $filename . '"');
+    if ($head['ContentLength'] > 0) {
+        header('Content-Length: ' . $head['ContentLength']);
+    }
+    // Defense in depth: never let object bytes run script in our origin, never sniff text
+    // as html. No script-src at all (default-src 'none') => any rendered doc is inert.
+    header('X-Content-Type-Options: nosniff');
+    header("Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
+    header('Cache-Control: no-store');
+
+    if (!$s3->streamObject($profile, $bucket, $key)) {
+        // headers already sent; nothing more we can do but stop
+        return;
+    }
+}
+
+function s3Download(App $app): void
+{
+    $b = $app->jsonBody();
+    $profile = trim((string) ($b['profile'] ?? ''));
+    $bucket = trim((string) ($b['bucket'] ?? ''));
+    $prefix = (string) ($b['prefix'] ?? '');
+    if ($profile === '' || $bucket === '') {
+        $app->fail(400, 'Missing profile or bucket.');
+    }
+    $jobId = bin2hex(random_bytes(8));
+    $res = (new S3($app->awsBin))->startDownload($profile, $bucket, $prefix, $app->downloadsRoot, $jobId);
+    $app->json(['ok' => true, 'job' => $res['job'], 'dest' => $res['dest']]);
+}
+
+function s3DownloadStatus(App $app): void
+{
+    $job = trim((string) ($app->jsonBody()['job'] ?? ''));
+    if (!preg_match('/^[a-f0-9]{16}$/', $job)) {
+        $app->fail(400, 'Bad job id.');
+    }
+    $app->json(['ok' => true] + (new S3($app->awsBin))->downloadStatus($job));
+}
+
+/** @return array{0:string,1:bool} [mime, inline-safe] */
+function s3Mime(string $key): array
+{
+    $ext = strtolower(pathinfo($key, PATHINFO_EXTENSION));
+    $img = [
+        'png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif',
+        'webp' => 'image/webp', 'bmp' => 'image/bmp', 'svg' => 'image/svg+xml', 'ico' => 'image/x-icon',
+        'avif' => 'image/avif', 'tif' => 'image/tiff', 'tiff' => 'image/tiff',
+    ];
+    if (isset($img[$ext])) {
+        return [$img[$ext], true];
+    }
+    if ($ext === 'pdf') {
+        return ['application/pdf', true];
+    }
+    // Everything text-like is served as text/plain (so e.g. .html is shown as source, never
+    // rendered) and previewed as text.
+    $text = ['txt', 'log', 'md', 'markdown', 'csv', 'tsv', 'json', 'xml', 'yml', 'yaml', 'ini',
+        'conf', 'cfg', 'env', 'sh', 'sql', 'js', 'ts', 'css', 'html', 'htm', 'php', 'py', 'rb',
+        'go', 'java', 'c', 'h', 'cpp', 'toml', 'properties', 'gitignore'];
+    if (in_array($ext, $text, true)) {
+        return ['text/plain; charset=utf-8', true];
+    }
+    return ['application/octet-stream', false];
 }

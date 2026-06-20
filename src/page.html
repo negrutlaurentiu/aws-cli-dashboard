@@ -19,8 +19,13 @@
         <p>MFA session-token manager &middot; <code>__HOST__:__PORT__</code></p>
       </div>
     </div>
+    <nav class="nav">
+      <a href="/" class="nav-link active">Credentials</a>
+      <a href="/s3" class="nav-link">S3 Browser</a>
+    </nav>
     <div class="topbar-actions">
-      <span class="lock-pill" title="Bound to localhost only">&#128274; localhost only</span>
+      <label class="sel-wrap"><span>Show</span>
+        <select id="account-filter" aria-label="Show account"></select></label>
       <button class="btn btn-ghost" id="refresh-all">Refresh all stored-MFA</button>
       <button class="btn btn-primary" id="add-account">+ Add account</button>
     </div>

@@ -34,6 +34,11 @@ No frameworks, no build step, no `node_modules` — just PHP's built-in server a
   target profile and tells you whether its credentials are still valid or expired.
 - **Default-profile panel** — see who `[default]` currently resolves to (live identity), spot
   when it's expired, and switch `[default]` to mirror any profile in one click.
+- **Account filter** — a dropdown to show just one account's card (handy when screen-sharing
+  with a client). It's a visual filter, shared with the S3 page via your browser.
+- **S3 browser** (`/s3`) — pick an account, browse buckets and folders, **preview** images,
+  PDFs and text inline, **download** a single file, or **download a whole bucket/prefix** to
+  `~/Downloads/aws-cli-dashboard`.
 - **Safe credential writes** — only the target profile's keys are rewritten; every other
   profile, comment and blank line in `~/.aws/credentials` is preserved, and a `.bak` backup
   is made before each write.
@@ -99,6 +104,31 @@ also delete and recreate the virtual MFA device in IAM to get a fresh seed.
   a card) and the dashboard copies that profile's credentials into `[default]`. Copying a
   long-term profile clears any stale session token; copying a temporary profile carries its
   session token across. Unscoped `aws` commands (no `--profile`) then use those credentials.
+
+## S3 browser
+
+Open **S3 Browser** from the top nav (or go to <http://127.0.0.1:8010/s3>). Pick an account —
+the browser uses that account's **target** profile (the one holding the session credentials) —
+then:
+
+- **Browse**: choose a bucket, click into folders, use the breadcrumb to go back up.
+- **Preview** (click a file or **View**): images and PDFs render inline; text/CSV/JSON/logs
+  show as text. Other types (zip, xlsx, binaries) offer a **Download** instead.
+- **Download a file**: the **Download** button on a row.
+- **Download a whole folder/bucket**: **⇩ Download this folder** copies everything under the
+  current path to `~/Downloads/aws-cli-dashboard/<bucket>/<prefix>` and shows live progress.
+
+If a profile's session has expired, S3 calls fail with a clear message — refresh that account
+on the Credentials page first.
+
+### Viewer safety
+
+Bucket contents are untrusted, so the file proxy never lets an object run script in the
+dashboard's origin: HTML/SVG/unknown types are served as `text/plain` or forced to download,
+every object response carries `X-Content-Type-Options: nosniff` and a script-free
+`Content-Security-Policy: default-src 'none'`, and only an allow-list of image/PDF/text types
+is ever shown inline. The viewer endpoint is authenticated with the same per-install token
+(passed as a query param so `<img>`/`<iframe>` can load it).
 
 ## Terminal usage
 

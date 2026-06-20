@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="__APP_TOKEN__">
+  <title>S3 Browser · AWS CLI Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%97%84%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">aws</span>
+      <div class="brand-text">
+        <h1>S3 Browser</h1>
+        <p>browse &middot; view &middot; download &middot; <code>__HOST__:__PORT__</code></p>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/" class="nav-link">Credentials</a>
+      <a href="/s3" class="nav-link active">S3 Browser</a>
+    </nav>
+    <div class="topbar-actions">
+      <label class="sel-wrap"><span>Account</span>
+        <select id="account-select" aria-label="Account"></select></label>
+      <label class="sel-wrap"><span>Bucket</span>
+        <select id="bucket-select" aria-label="Bucket"></select></label>
+    </div>
+  </header>
+
+  <main>
+    <div class="s3-toolbar">
+      <nav class="breadcrumb" id="breadcrumb" aria-label="path"></nav>
+      <div class="s3-actions">
+        <button class="btn btn-ghost" id="reload-btn">Reload</button>
+        <button class="btn btn-primary" id="download-folder">&#8681; Download this folder</button>
+      </div>
+    </div>
+
+    <div class="s3-status" id="s3-status"></div>
+    <section class="s3-list" id="s3-list" aria-live="polite"></section>
+  </main>
+
+  <!-- file viewer -->
+  <div class="modal-backdrop hidden" id="viewer">
+    <div class="modal viewer-modal" role="dialog" aria-modal="true" aria-labelledby="viewer-title">
+      <div class="modal-head">
+        <h2 id="viewer-title"></h2>
+        <div class="viewer-head-actions">
+          <a class="btn-mini" id="viewer-download" download>Download</a>
+          <button class="icon-btn" id="viewer-close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div class="viewer-body" id="viewer-body"></div>
+    </div>
+  </div>
+
+  <!-- folder/bucket download progress -->
+  <div id="dl-panel" class="dl-panel hidden">
+    <div class="dl-head">
+      <b id="dl-title">Downloading…</b>
+      <button class="icon-btn" id="dl-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="dl-info" id="dl-info"></div>
+    <pre class="dl-log" id="dl-log"></pre>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+
+  <template id="row-tpl">
+    <div class="s3-row">
+      <span class="s3-icon"></span>
+      <button class="s3-name"></button>
+      <span class="s3-size"></span>
+      <span class="s3-date"></span>
+      <span class="s3-row-actions"></span>
+    </div>
+  </template>
+
+  <script src="/s3.js" defer></script>
+</body>
+</html>

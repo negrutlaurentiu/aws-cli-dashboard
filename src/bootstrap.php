@@ -8,6 +8,7 @@ require __DIR__ . '/Totp.php';
 require __DIR__ . '/CredentialsFile.php';
 require __DIR__ . '/Sts.php';
 require __DIR__ . '/Store.php';
+require __DIR__ . '/S3.php';
 
 /**
  * Shared configuration + security helpers for the dashboard. Everything here assumes a
@@ -24,6 +25,7 @@ final class App
     public string $awsDir;
     public string $credentialsPath;
     public string $awsConfigPath;
+    public string $downloadsRoot;
     public Store $store;
     public string $awsBin;
 
@@ -36,6 +38,8 @@ final class App
         $this->awsDir = $home . '/.aws';
         $this->credentialsPath = getenv('AWS_SHARED_CREDENTIALS_FILE') ?: ($this->awsDir . '/credentials');
         $this->awsConfigPath = getenv('AWS_CONFIG_FILE') ?: ($this->awsDir . '/config');
+        // S3 folder/bucket downloads are confined under here, never an arbitrary path.
+        $this->downloadsRoot = $home . '/Downloads/aws-cli-dashboard';
 
         $this->store = new Store($this->configDir);
         $this->awsBin = $this->resolveAwsBin();
@@ -87,6 +91,22 @@ final class App
         $sent = (string) ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
         if (!hash_equals($this->store->appToken(), $sent)) {
             $this->fail(403, 'Missing or invalid CSRF token. Reload the dashboard.');
+        }
+    }
+
+    /**
+     * Token check for GET endpoints loaded as <img>/<iframe>/links, where a request header
+     * can't be set. The token lives in the same-origin page, so a cross-origin attacker
+     * can't read it to forge the URL.
+     */
+    public function assertCsrfQuery(): void
+    {
+        $sent = (string) ($_GET['token'] ?? '');
+        if (!hash_equals($this->store->appToken(), $sent)) {
+            http_response_code(403);
+            header('Content-Type: text/plain; charset=utf-8');
+            echo 'Forbidden: invalid token.';
+            exit;
         }
     }
 

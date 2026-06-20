@@ -66,7 +66,37 @@ function reconcile(accounts) {
       if (el) updateCard(el, acc);
     });
   }
+  populateAccountFilter(accounts);
+  applyAccountFilter();
   tick();
+}
+
+/* ---------- account filter (client-side show/hide for client demos) ---------- */
+
+const acctFilter = $("#account-filter");
+
+function populateAccountFilter(accounts) {
+  const cur = acctFilter.value || localStorage.getItem("awsdash.account") || "all";
+  acctFilter.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "all";
+  all.textContent = "All accounts";
+  acctFilter.appendChild(all);
+  accounts.forEach((a) => {
+    const o = document.createElement("option");
+    o.value = a.id;
+    o.textContent = a.label;
+    acctFilter.appendChild(o);
+  });
+  acctFilter.value = [...acctFilter.options].some((o) => o.value === cur) ? cur : "all";
+}
+
+function applyAccountFilter() {
+  const sel = acctFilter.value || "all";
+  localStorage.setItem("awsdash.account", sel);
+  grid.querySelectorAll(".card").forEach((el) => {
+    el.style.display = sel === "all" || el.dataset.id === sel ? "" : "none";
+  });
 }
 
 function buildCard(acc) {
@@ -552,6 +582,7 @@ function cssEscape(str) {
 $("#add-account").addEventListener("click", () => openModal());
 $("#add-account-empty").addEventListener("click", () => openModal());
 $("#refresh-all").addEventListener("click", refreshAllStored);
+acctFilter.addEventListener("change", applyAccountFilter);
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-cancel").addEventListener("click", closeModal);
 $("#dp-recheck").addEventListener("click", loadDefaultPanel);
