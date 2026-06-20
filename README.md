@@ -125,11 +125,14 @@ This is a **single-user local tool**. The protections exist to stop *other web p
   a cross-origin page can't read it.
 - **No shell injection.** Every value passed to the AWS CLI goes through `escapeshellarg`.
 - **Atomic, backed-up, serialized writes.** `~/.aws/credentials` is copied to
-  `~/.aws/credentials.bak`, then replaced via a temp-file `rename`, preserving `0600`
-  permissions. An advisory `flock` guards the read-modify-write so two concurrent refreshes
-  (two tabs, or the UI plus the CLI) can't lose each other's updates. Other profiles,
-  comments and `[headers]` are preserved byte-for-byte; duplicate profile names are updated
-  last-wins to match the AWS CLI.
+  `~/.aws/credentials.bak`, then replaced via a temp-file `rename`. An advisory `flock` guards
+  the read-modify-write so two concurrent refreshes (two tabs, or the UI plus the CLI) can't
+  lose each other's updates. Other profiles, comments and `[headers]` are preserved
+  byte-for-byte; duplicate profile names are updated last-wins to match the AWS CLI.
+- **No world-readable window.** The temp and `.bak` files are created `0600` from the very
+  first byte (via `umask` + exclusive `O_EXCL` create), so secrets are never momentarily
+  readable by another local user on a shared host — and a value containing a newline is
+  refused, so nothing can inject extra lines into the credentials file.
 - **Secrets at rest.** `config/accounts.json` and `config/state.json` are written `0600` and
   are **gitignored**. They never leave your machine.
 

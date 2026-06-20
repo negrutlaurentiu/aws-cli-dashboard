@@ -219,16 +219,30 @@ final class Store
         if ($json === false) {
             throw new \RuntimeException('Failed to encode JSON for ' . $path);
         }
-        $tmp = $path . '.tmp.' . getmypid();
-        if (file_put_contents($tmp, $json . "\n", LOCK_EX) === false) {
+        // accounts.json can hold the MFA seed — create the temp 0600 from the first byte
+        // (umask) and via exclusive create so it's never world-readable or symlink-followed.
+        $oldUmask = umask(0077);
+        try {
+            $tmp = $path . '.tmp.' . getmypid();
             @unlink($tmp);
-            throw new \RuntimeException('Failed to write ' . $path);
+            $fh = @fopen($tmp, 'xb');
+            if ($fh === false) {
+                throw new \RuntimeException('Failed to create temp file for ' . $path);
+            }
+            if (@fwrite($fh, $json . "\n") === false) {
+                fclose($fh);
+                @unlink($tmp);
+                throw new \RuntimeException('Failed to write ' . $path);
+            }
+            fclose($fh);
+            @chmod($tmp, 0600);
+            if (!@rename($tmp, $path)) {
+                @unlink($tmp);
+                throw new \RuntimeException('Failed to replace ' . $path);
+            }
+            @chmod($path, 0600);
+        } finally {
+            umask($oldUmask);
         }
-        @chmod($tmp, 0600);
-        if (!@rename($tmp, $path)) {
-            @unlink($tmp);
-            throw new \RuntimeException('Failed to replace ' . $path);
-        }
-        @chmod($path, 0600);
     }
 }

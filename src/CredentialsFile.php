@@ -110,6 +110,11 @@ final class CredentialsFile
 
         $lines = $this->sections[$index]['lines'];
         foreach ($values as $key => $value) {
+            // A newline in a value would inject extra INI lines / a fake [section]. AWS
+            // credential values never contain newlines, so refuse them defensively.
+            if (preg_match('/[\r\n]/', $value)) {
+                throw new \RuntimeException("Refusing to write a newline in value for '{$key}'.");
+            }
             $rendered = $key . ' = ' . $value;
             $found = false;
             foreach ($lines as $li => $line) {
@@ -194,31 +199,49 @@ final class CredentialsFile
      */
     public function save(): void
     {
-        $dir = \dirname($this->path);
-        if (!is_dir($dir) && !mkdir($dir, 0700, true) && !is_dir($dir)) {
-            throw new \RuntimeException("Unable to create {$dir}");
-        }
-
-        if (is_file($this->path)) {
-            $backup = $this->path . '.bak';
-            if (!@copy($this->path, $backup)) {
-                throw new \RuntimeException("Unable to write backup {$backup}");
+        // Force every file we create here to be 0600 at *creation* time. Otherwise the
+        // default umask (commonly 0644) leaves the secret-bearing backup/temp briefly
+        // world/group-readable before the later chmod, which another local user on a shared
+        // host could race to read. umask is process-global, so restore it in finally.
+        $oldUmask = umask(0077);
+        try {
+            $dir = \dirname($this->path);
+            if (!is_dir($dir) && !mkdir($dir, 0700, true) && !is_dir($dir)) {
+                throw new \RuntimeException("Unable to create {$dir}");
             }
-            @chmod($backup, 0600);
-        }
 
-        $tmp = $this->path . '.tmp.' . getmypid();
-        $bytes = file_put_contents($tmp, $this->render(), LOCK_EX);
-        if ($bytes === false) {
-            @unlink($tmp);
-            throw new \RuntimeException("Unable to write temp credentials file {$tmp}");
-        }
-        @chmod($tmp, 0600);
+            if (is_file($this->path)) {
+                $backup = $this->path . '.bak';
+                @unlink($backup); // never copy through a pre-existing/symlinked backup path
+                if (!@copy($this->path, $backup)) {
+                    throw new \RuntimeException("Unable to write backup {$backup}");
+                }
+                @chmod($backup, 0600);
+            }
 
-        if (!@rename($tmp, $this->path)) {
-            @unlink($tmp);
-            throw new \RuntimeException("Unable to replace {$this->path}");
+            $tmp = $this->path . '.tmp.' . getmypid();
+            @unlink($tmp); // clear any stale/planted temp path first
+            // 'x' = O_CREAT|O_EXCL: refuses a pre-existing or symlinked path, and under the
+            // umask above the file is 0600 from the very first byte written.
+            $fh = @fopen($tmp, 'xb');
+            if ($fh === false) {
+                throw new \RuntimeException("Unable to create temp credentials file {$tmp}");
+            }
+            if (@fwrite($fh, $this->render()) === false) {
+                fclose($fh);
+                @unlink($tmp);
+                throw new \RuntimeException("Unable to write temp credentials file {$tmp}");
+            }
+            fclose($fh);
+            @chmod($tmp, 0600);
+
+            if (!@rename($tmp, $this->path)) {
+                @unlink($tmp);
+                throw new \RuntimeException("Unable to replace {$this->path}");
+            }
+            @chmod($this->path, 0600);
+        } finally {
+            umask($oldUmask);
         }
-        @chmod($this->path, 0600);
     }
 }
