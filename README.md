@@ -30,6 +30,10 @@ No frameworks, no build step, no `node_modules` — just PHP's built-in server a
   30-second countdown ring; refresh becomes a single click.
 - **Manual mode** — prefer to keep MFA as a true second factor? Leave the secret blank and
   type the 6-digit code each time.
+- **Test / check expiry** — one click per card runs `aws sts get-caller-identity` on the
+  target profile and tells you whether its credentials are still valid or expired.
+- **Default-profile panel** — see who `[default]` currently resolves to (live identity), spot
+  when it's expired, and switch `[default]` to mirror any profile in one click.
 - **Safe credential writes** — only the target profile's keys are rewritten; every other
   profile, comment and blank line in `~/.aws/credentials` is preserved, and a `.bak` backup
   is made before each write.
@@ -83,6 +87,18 @@ paste it into the *MFA secret* field for fully automatic refreshes.
 If you only have the device/QR already configured and never saved the seed, that's fine —
 leave the field blank and use **manual mode** (type the 6-digit code at refresh time). You can
 also delete and recreate the virtual MFA device in IAM to get a fresh seed.
+
+## Checking expiry & switching the default profile
+
+- **Is a profile still valid?** Click **Test / check expiry** on a card. It runs
+  `aws sts get-caller-identity` against that card's *target* profile and reports the identity
+  (account + ARN) if valid, or **Expired** / **Invalid** otherwise — the authoritative answer.
+- **What is `[default]` right now?** The panel at the top runs the same check on `[default]`
+  on load and shows the current identity (or that it's expired).
+- **Switch the default.** Pick a profile in the panel's dropdown (or hit **Set as default** on
+  a card) and the dashboard copies that profile's credentials into `[default]`. Copying a
+  long-term profile clears any stale session token; copying a temporary profile carries its
+  session token across. Unscoped `aws` commands (no `--profile`) then use those credentials.
 
 ## Terminal usage
 

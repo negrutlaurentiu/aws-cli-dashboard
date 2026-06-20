@@ -1,10 +1,11 @@
 {
+  "_comment": "Template only. Copy to accounts.json (gitignored) or add accounts from the UI. Real ARNs/account IDs live only in your local accounts.json — never commit them. 'totp_secret' is optional: set it for one-click refresh, or leave blank to type the 6-digit MFA code each time.",
   "accounts": [
     {
-      "id": "mobilityplus",
-      "label": "Mobility Plus",
-      "source_profile": "MobilityPlus",
-      "target_profile": "mp-temp",
+      "id": "example",
+      "label": "Example Account",
+      "source_profile": "my-longterm-profile",
+      "target_profile": "my-longterm-profile-temp",
       "mfa_serial": "arn:aws:iam::111122223333:mfa/your-device-name",
       "duration_seconds": 129600,
       "region": "us-east-1",

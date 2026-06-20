@@ -53,6 +53,16 @@ try {
             refresh($app);
             break;
 
+        case $method === 'POST' && $path === '/api/whoami':
+            $app->assertCsrf();
+            whoami($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/set-default':
+            $app->assertCsrf();
+            setDefault($app);
+            break;
+
         default:
             $app->fail(404, 'Not found: ' . $method . ' ' . $path);
     }
@@ -171,6 +181,83 @@ function refresh(App $app): void
         'used_stored_secret' => $usedStoredSecret,
         'backup' => $app->credentialsPath . '.bak',
     ]);
+}
+
+/** Run get-caller-identity on a profile to report who/what it is and whether it's valid. */
+function whoami(App $app): void
+{
+    $profile = trim((string) ($app->jsonBody()['profile'] ?? ''));
+    if ($profile === '') {
+        $app->fail(400, 'Missing profile.');
+    }
+
+    $sts = new Sts($app->awsBin);
+    try {
+        $id = $sts->getCallerIdentity($profile);
+        $app->json([
+            'ok' => true,
+            'valid' => true,
+            'profile' => $profile,
+            'account' => $id['Account'],
+            'arn' => $id['Arn'],
+            'user_id' => $id['UserId'],
+        ]);
+    } catch (\Throwable $e) {
+        $msg = $e->getMessage();
+        $app->json([
+            'ok' => true,
+            'valid' => false,
+            'profile' => $profile,
+            'expired' => (bool) preg_match('/expired/i', $msg),
+            'error' => $msg,
+        ]);
+    }
+}
+
+/** Copy a profile's credentials into [default], so unscoped aws commands use them. */
+function setDefault(App $app): void
+{
+    $profile = trim((string) ($app->jsonBody()['profile'] ?? ''));
+    if ($profile === '') {
+        $app->fail(400, 'Missing profile.');
+    }
+    if ($profile === 'default') {
+        $app->fail(400, 'That profile is already the default.');
+    }
+
+    $app->withCredentialsLock(function () use ($app, $profile): void {
+        $file = new CredentialsFile($app->credentialsPath);
+        $vals = $file->getProfile($profile);
+        if ($vals === null) {
+            throw new \RuntimeException("Profile [{$profile}] is not in the credentials file.");
+        }
+        $akid = $vals['aws_access_key_id'] ?? '';
+        $secret = $vals['aws_secret_access_key'] ?? '';
+        if ($akid === '' || $secret === '') {
+            throw new \RuntimeException("Profile [{$profile}] has no access key/secret to copy.");
+        }
+
+        $copy = ['aws_access_key_id' => $akid, 'aws_secret_access_key' => $secret];
+        // The source may carry its token under the canonical or the legacy alias.
+        $token = (string) ($vals['aws_session_token'] ?? $vals['aws_security_token'] ?? '');
+        if ($token !== '') {
+            $copy['aws_session_token'] = $token;
+        }
+        $file->setProfile('default', $copy);
+        if ($token === '') {
+            // Long-term keys → no session token should linger in [default].
+            $file->removeKey('default', 'aws_session_token');
+        }
+        // We only ever write the canonical aws_session_token, but botocore reads the legacy
+        // aws_security_token first — a stale alias would shadow our value, so always strip it.
+        $file->removeKey('default', 'aws_security_token');
+        if (!empty($vals['region'])) {
+            $file->setProfile('default', ['region' => (string) $vals['region']]);
+        }
+        $file->save();
+    });
+
+    $app->json(['ok' => true, 'profile' => $profile]);
 }
 
 function maskKey(string $key): string

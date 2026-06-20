@@ -127,6 +127,48 @@ final class CredentialsFile
         $this->sections[$index]['lines'] = $lines;
     }
 
+    /**
+     * Return a profile's key/value pairs (last-wins on duplicate sections, matching the aws
+     * CLI), or null if the profile does not exist. Comments and blank lines are ignored.
+     *
+     * @return array<string,string>|null
+     */
+    public function getProfile(string $name): ?array
+    {
+        $index = null;
+        foreach ($this->sections as $i => $s) {
+            if ($s['name'] === $name) {
+                $index = $i;
+            }
+        }
+        if ($index === null) {
+            return null;
+        }
+
+        $values = [];
+        foreach ($this->sections[$index]['lines'] as $line) {
+            if (preg_match('/^\s*([^#;=\s][^=]*?)\s*=\s*(.*)$/', $line, $m)) {
+                $values[trim($m[1])] = trim($m[2]);
+            }
+        }
+        return $values;
+    }
+
+    /** Remove a single key from a profile (all occurrences), if present. */
+    public function removeKey(string $name, string $key): void
+    {
+        foreach ($this->sections as $i => $s) {
+            if ($s['name'] !== $name) {
+                continue;
+            }
+            $this->sections[$i]['lines'] = array_values(array_filter(
+                $s['lines'],
+                static fn (string $line): bool =>
+                    !preg_match('/^\s*' . preg_quote($key, '/') . '\s*=/', $line)
+            ));
+        }
+    }
+
     public function render(): string
     {
         $out = [];

@@ -27,6 +27,21 @@
   </header>
 
   <main>
+    <section id="default-panel" class="default-panel">
+      <div class="dp-left">
+        <span class="dp-star" aria-hidden="true">&#9733;</span>
+        <div class="dp-info">
+          <div class="dp-title">Default profile <code>[default]</code></div>
+          <div class="dp-identity" id="dp-identity">Checking current default credentials…</div>
+        </div>
+      </div>
+      <div class="dp-right">
+        <button class="btn-mini" id="dp-recheck">Recheck</button>
+        <select id="dp-select" class="dp-select" aria-label="Profile to set as default"></select>
+        <button class="btn btn-ghost" id="dp-apply">Set as default</button>
+      </div>
+    </section>
+
     <section id="empty-state" class="empty hidden">
       <div class="empty-card">
         <div class="empty-glyph">&#9729;</div>
@@ -113,10 +128,19 @@
           </div>
         </div>
         <div class="card-menu">
-          <button class="icon-btn edit" title="Edit" aria-label="Edit">&#9881;</button>
+          <button class="btn-mini edit" title="Edit this MFA device">Edit</button>
           <button class="icon-btn del" title="Delete" aria-label="Delete">&#128465;</button>
         </div>
       </div>
+
+      <button class="mfa-id" title="Click to copy the full ARN">
+        <span class="mfa-key" aria-hidden="true">&#128273;</span>
+        <span class="mfa-meta">
+          <span class="mfa-device"></span>
+          <span class="mfa-arn"></span>
+        </span>
+        <span class="mfa-copy" aria-hidden="true">&#10697;</span>
+      </button>
 
       <div class="status-row">
         <span class="status-dot"></span>
@@ -138,13 +162,16 @@
       </div>
 
       <div class="manual-area">
+        <span class="manual-cap">enter your 6-digit MFA code, then Refresh</span>
         <input class="manual-code" inputmode="numeric" autocomplete="one-time-code"
                maxlength="8" placeholder="000000" aria-label="MFA code">
       </div>
 
-      <div class="serial" title="MFA serial"></div>
-
       <button class="btn btn-refresh">Refresh credentials</button>
+      <div class="card-actions">
+        <button class="btn-mini test" title="Run get-caller-identity on the target profile">Test / check expiry</button>
+        <button class="btn-mini setdef" title="Copy these credentials into the default profile">Set as default</button>
+      </div>
       <div class="card-result"></div>
     </article>
   </template>

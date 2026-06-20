@@ -80,6 +80,9 @@ function buildCard(acc) {
     const code = el.__acc?.totp?.code;
     if (code) copy(code);
   });
+  $(".mfa-id", el).addEventListener("click", () => { if (el.__arn) copy(el.__arn); });
+  $(".test", el).addEventListener("click", () => doTest(el));
+  $(".setdef", el).addEventListener("click", () => doSetDefault(el));
   const manual = $(".manual-code", el);
   manual.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") doRefresh(el);
@@ -95,7 +98,12 @@ function updateCard(el, acc) {
   $(".card-label", el).textContent = acc.label;
   $(".chip.src", el).textContent = acc.source_profile;
   $(".chip.dst", el).textContent = acc.target_profile;
-  $(".serial", el).textContent = acc.mfa_serial;
+
+  const arn = acc.mfa_serial || "";
+  el.__arn = arn;
+  const device = arn.includes("/") ? arn.slice(arn.indexOf("/") + 1) : arn;
+  $(".mfa-device", el).textContent = device || "(no ARN set)";
+  $(".mfa-arn", el).textContent = arn;
 
   const totpArea = $(".totp-area", el);
   const manualArea = $(".manual-area", el);
@@ -200,6 +208,7 @@ async function doRefresh(el) {
     toast("ok", `${acc.label} refreshed`, `Profile ${data.target_profile} · expires ${when.toLocaleTimeString()}`);
     if (!acc.has_secret) $(".manual-code", el).value = "";
     loadAccounts();
+    loadDefaultSelect();
   } catch (e) {
     result.className = "card-result show";
     result.innerHTML = `<div class="err">${escapeHtml(e.message)}</div>`;
@@ -234,6 +243,117 @@ async function removeAccount(acc) {
     loadAccounts();
   } catch (e) {
     toast("err", "Delete failed", e.message);
+  }
+}
+
+async function doTest(el) {
+  const acc = el.__acc;
+  const result = $(".card-result", el);
+  const btn = $(".test", el);
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = "Checking…";
+  result.className = "card-result";
+  result.innerHTML = "";
+  try {
+    const d = await api("/api/whoami", { method: "POST", body: { profile: acc.target_profile } });
+    result.className = "card-result show";
+    if (d.valid) {
+      result.innerHTML =
+        `<div class="ok">✓ <b>${escapeHtml(acc.target_profile)}</b> is valid` +
+        `<small>${escapeHtml(d.arn)} · account ${escapeHtml(d.account)}</small></div>`;
+    } else {
+      result.innerHTML =
+        `<div class="err">${d.expired ? "⏱ Expired" : "✖ Invalid"} — ${escapeHtml(acc.target_profile)}\n` +
+        `${escapeHtml(d.error)}</div>`;
+    }
+  } catch (e) {
+    result.className = "card-result show";
+    result.innerHTML = `<div class="err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function doSetDefault(el) {
+  const acc = el.__acc;
+  if (!confirm(`Copy the credentials from profile "${acc.target_profile}" into [default]?\n\n` +
+      `Unscoped aws commands (no --profile) will then use them.`)) {
+    return;
+  }
+  const btn = $(".setdef", el);
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = "Setting…";
+  try {
+    await api("/api/set-default", { method: "POST", body: { profile: acc.target_profile } });
+    toast("ok", "Default profile updated", `[default] now mirrors ${acc.target_profile}`);
+    loadDefaultPanel();
+  } catch (e) {
+    toast("err", "Couldn't set default", e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+/* ---------- default-profile panel ---------- */
+
+const dpIdentity = $("#dp-identity");
+const dpSelect = $("#dp-select");
+
+async function loadDefaultPanel() {
+  dpIdentity.className = "dp-identity";
+  dpIdentity.innerHTML = `<span class="dot"></span><span class="muted">checking…</span>`;
+  try {
+    const d = await api("/api/whoami", { method: "POST", body: { profile: "default" } });
+    if (d.valid) {
+      dpIdentity.className = "dp-identity valid";
+      dpIdentity.innerHTML =
+        `<span class="dot"></span><span class="who">${escapeHtml(d.arn)}</span>` +
+        `<span class="muted">· account ${escapeHtml(d.account)}</span>`;
+    } else {
+      dpIdentity.className = "dp-identity invalid";
+      dpIdentity.innerHTML =
+        `<span class="dot"></span><span class="muted">${d.expired ? "expired / " : ""}invalid — ` +
+        `${escapeHtml(d.error)}</span>`;
+    }
+  } catch (e) {
+    dpIdentity.className = "dp-identity invalid";
+    dpIdentity.innerHTML = `<span class="dot"></span><span class="muted">${escapeHtml(e.message)}</span>`;
+  }
+}
+
+async function loadDefaultSelect() {
+  try {
+    const data = await api("/api/profiles");
+    const current = dpSelect.value;
+    dpSelect.innerHTML = "";
+    (data.profiles || []).filter((p) => p !== "default").forEach((p) => {
+      const o = document.createElement("option");
+      o.value = p;
+      o.textContent = p;
+      dpSelect.appendChild(o);
+    });
+    if (current) dpSelect.value = current;
+  } catch (_) { /* non-fatal */ }
+}
+
+async function applyDefault() {
+  const profile = dpSelect.value;
+  if (!profile) return;
+  if (!confirm(`Copy credentials from "${profile}" into [default]?`)) return;
+  const btn = $("#dp-apply");
+  btn.disabled = true;
+  try {
+    await api("/api/set-default", { method: "POST", body: { profile } });
+    toast("ok", "Default profile updated", `[default] now mirrors ${profile}`);
+    loadDefaultPanel();
+  } catch (e) {
+    toast("err", "Couldn't set default", e.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -292,6 +412,7 @@ form.addEventListener("submit", async (ev) => {
     toast("ok", "Account saved", payload.label);
     closeModal();
     loadAccounts();
+    loadDefaultSelect();
   } catch (e) {
     toast("err", "Couldn't save", e.message);
   } finally {
@@ -365,11 +486,15 @@ $("#add-account-empty").addEventListener("click", () => openModal());
 $("#refresh-all").addEventListener("click", refreshAllStored);
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-cancel").addEventListener("click", closeModal);
+$("#dp-recheck").addEventListener("click", loadDefaultPanel);
+$("#dp-apply").addEventListener("click", applyDefault);
 modal.addEventListener("click", (ev) => { if (ev.target === modal) closeModal(); });
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !modal.classList.contains("hidden")) closeModal();
 });
 
 loadAccounts();
+loadDefaultPanel();
+loadDefaultSelect();
 setInterval(tick, 1000);
 setInterval(loadAccounts, 60000); // safety re-sync

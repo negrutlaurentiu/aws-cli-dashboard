@@ -65,6 +65,35 @@ final class Sts
         ];
     }
 
+    /**
+     * `aws sts get-caller-identity` for a profile — the authoritative "are these credentials
+     * valid / expired?" check. Throws (with the CLI's error text) when the profile's creds
+     * are missing, expired or invalid.
+     *
+     * @return array{Account:string,Arn:string,UserId:string}
+     */
+    public function getCallerIdentity(string $profile): array
+    {
+        $args = [$this->awsBin, 'sts', 'get-caller-identity', '--profile', $profile, '--output', 'json'];
+        $result = $this->run(implode(' ', array_map('escapeshellarg', $args)));
+
+        if ($result['code'] !== 0) {
+            $msg = trim($result['stderr']) !== '' ? trim($result['stderr']) : trim($result['stdout']);
+            throw new \RuntimeException($msg !== '' ? $msg : "aws CLI exited with status {$result['code']}");
+        }
+
+        $data = json_decode($result['stdout'], true);
+        if (!is_array($data) || !isset($data['Account'], $data['Arn'])) {
+            throw new \RuntimeException('Unexpected aws CLI output: ' . substr($result['stdout'], 0, 300));
+        }
+
+        return [
+            'Account' => (string) $data['Account'],
+            'Arn' => (string) $data['Arn'],
+            'UserId' => (string) ($data['UserId'] ?? ''),
+        ];
+    }
+
     /** @return array{code:int,stdout:string,stderr:string} */
     private function run(string $cmd): array
     {
