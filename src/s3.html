@@ -26,8 +26,6 @@
     <div class="topbar-actions">
       <label class="sel-wrap"><span>Account</span>
         <select id="account-select" aria-label="Account"></select></label>
-      <label class="sel-wrap"><span>Bucket</span>
-        <select id="bucket-select" aria-label="Bucket"></select></label>
     </div>
   </header>
 
@@ -35,13 +33,15 @@
     <div class="s3-toolbar">
       <nav class="breadcrumb" id="breadcrumb" aria-label="path"></nav>
       <div class="s3-actions">
+        <input class="s3-filter" id="s3-filter" type="search" placeholder="filter this page…" aria-label="Filter">
         <button class="btn btn-ghost" id="reload-btn">Reload</button>
-        <button class="btn btn-primary" id="download-folder">&#8681; Download this folder</button>
+        <button class="btn btn-primary hidden" id="download-folder">&#8681; Download this folder</button>
       </div>
     </div>
 
     <div class="s3-status" id="s3-status"></div>
     <section class="s3-list" id="s3-list" aria-live="polite"></section>
+    <div class="s3-pager" id="s3-pager"></div>
   </main>
 
   <!-- file viewer -->

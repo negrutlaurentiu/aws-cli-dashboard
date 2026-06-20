@@ -4,19 +4,30 @@ const TOKEN = document.querySelector('meta[name="csrf-token"]').content;
 const $ = (s, r = document) => r.querySelector(s);
 
 const state = {
-  accounts: [],   // [{id,label,target_profile}]
-  profile: "",    // active profile (target_profile of selected account)
+  accounts: [],
+  profile: "",
+  view: "buckets",          // "buckets" | "objects"
+  buckets: [],
+  bucketPage: 0,
+  bucketsPerPage: 24,
   bucket: "",
   prefix: "",
+  pageSize: 200,
+  tokenStack: [""],         // starting token per object page; index 0 = first page ("")
+  pageIndex: 0,
+  nextToken: "",
+  filter: "",
   dlTimer: null,
 };
 
 const els = {
   account: $("#account-select"),
-  bucket: $("#bucket-select"),
   crumb: $("#breadcrumb"),
   list: $("#s3-list"),
   status: $("#s3-status"),
+  pager: $("#s3-pager"),
+  filter: $("#s3-filter"),
+  download: $("#download-folder"),
 };
 
 async function api(path, body) {
@@ -37,11 +48,10 @@ function objectUrl(key, dl) {
   return "/api/s3/object?" + q.toString();
 }
 
-/* ---------- accounts + buckets ---------- */
+/* ---------- accounts ---------- */
 
 async function init() {
   try {
-    // /api/accounts is a GET endpoint (the POST route creates an account), so don't use api()
     const res = await fetch("/api/accounts", { headers: { "X-CSRF-Token": TOKEN } });
     const data = await res.json();
     if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
@@ -54,7 +64,6 @@ async function init() {
     setStatus("No accounts configured yet. Add one on the Credentials page first.", "err");
     return;
   }
-
   els.account.innerHTML = "";
   state.accounts.forEach((a) => {
     const o = document.createElement("option");
@@ -64,7 +73,6 @@ async function init() {
   });
   const saved = localStorage.getItem("awsdash.account");
   if (saved && state.accounts.some((a) => a.id === saved)) els.account.value = saved;
-
   await onAccountChange();
 }
 
@@ -72,134 +80,256 @@ async function onAccountChange() {
   const acc = state.accounts.find((a) => a.id === els.account.value) || state.accounts[0];
   localStorage.setItem("awsdash.account", acc.id);
   state.profile = acc.target_profile;
+  await loadBuckets();
+}
+
+/* ---------- buckets view ---------- */
+
+async function loadBuckets() {
+  state.view = "buckets";
   state.bucket = "";
   state.prefix = "";
-  els.bucket.innerHTML = `<option>loading…</option>`;
+  state.filter = "";
+  els.filter.value = "";
+  els.download.classList.add("hidden");
   setStatus(`Loading buckets for profile ${state.profile}…`);
+  els.list.innerHTML = "";
+  els.pager.innerHTML = "";
   try {
     const data = await api("/api/s3/buckets", { profile: state.profile });
-    const buckets = data.buckets || [];
-    els.bucket.innerHTML = "";
-    if (buckets.length === 0) {
-      els.bucket.innerHTML = `<option value="">(no buckets)</option>`;
-      els.list.innerHTML = "";
-      setStatus("No buckets visible for this profile.", "muted");
-      return;
-    }
-    buckets.forEach((b) => {
-      const o = document.createElement("option");
-      o.value = b.name;
-      o.textContent = b.name;
-      els.bucket.appendChild(o);
-    });
-    state.bucket = buckets[0].name;
-    await loadList();
+    state.buckets = data.buckets || [];
+    state.bucketPage = 0;
+    renderBuckets();
   } catch (e) {
-    els.bucket.innerHTML = `<option value="">(error)</option>`;
-    els.list.innerHTML = "";
+    state.buckets = [];
     setStatus(s3Error(e), "err");
   }
 }
 
-async function onBucketChange() {
-  state.bucket = els.bucket.value;
-  state.prefix = "";
-  await loadList();
+function filteredBuckets() {
+  const f = state.filter.trim().toLowerCase();
+  return f ? state.buckets.filter((b) => b.name.toLowerCase().includes(f)) : state.buckets;
 }
 
-/* ---------- listing ---------- */
-
-async function loadList() {
-  if (!state.bucket) return;
-  setStatus("Loading…");
+function renderBuckets() {
+  state.view = "buckets";
+  els.download.classList.add("hidden");
   renderBreadcrumb();
-  try {
-    const data = await api("/api/s3/list", { profile: state.profile, bucket: state.bucket, prefix: state.prefix });
-    renderList(data);
-    const n = (data.prefixes || []).length + (data.objects || []).length;
-    setStatus(`${n} item${n === 1 ? "" : "s"}${data.truncated ? " (first 2000 shown — narrow with a subfolder)" : ""}`, "muted");
-  } catch (e) {
-    els.list.innerHTML = "";
-    setStatus(s3Error(e), "err");
-  }
-}
-
-function renderList(data) {
   els.list.innerHTML = "";
-  const prefixes = data.prefixes || [];
-  const objects = data.objects || [];
 
-  if (prefixes.length === 0 && objects.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "s3-empty";
-    empty.textContent = "This folder is empty.";
-    els.list.appendChild(empty);
+  const all = filteredBuckets();
+  const per = state.bucketsPerPage;
+  const total = all.length;
+  const start = state.bucketPage * per;
+  const page = all.slice(start, start + per);
+
+  if (total === 0) {
+    showEmpty(state.filter ? "No buckets match your filter." : "No buckets visible for this profile.");
+    els.pager.innerHTML = "";
+    setStatus(`${state.buckets.length} bucket(s)`, "muted");
     return;
   }
 
-  prefixes.forEach((p) => {
-    const name = p.slice(state.prefix.length).replace(/\/$/, "");
+  page.forEach((b) => {
     const row = makeRow();
-    row.querySelector(".s3-icon").textContent = "📁";
-    const nameBtn = row.querySelector(".s3-name");
-    nameBtn.textContent = name + "/";
-    nameBtn.classList.add("is-folder");
-    nameBtn.addEventListener("click", () => { state.prefix = p; loadList(); });
-    els.list.appendChild(row);
-  });
-
-  objects.forEach((o) => {
-    const kind = fileKind(o.name);
-    const row = makeRow();
-    row.querySelector(".s3-icon").textContent = kindIcon(kind);
-    const nameBtn = row.querySelector(".s3-name");
-    nameBtn.textContent = o.name;
-    nameBtn.title = "Open";
-    nameBtn.addEventListener("click", () => openViewer(o));
-    row.querySelector(".s3-size").textContent = fmtSize(o.size);
-    row.querySelector(".s3-date").textContent = fmtDate(o.modified);
-
+    row.querySelector(".s3-icon").textContent = "🪣";
+    const name = row.querySelector(".s3-name");
+    name.textContent = b.name;
+    name.classList.add("is-folder");
+    name.title = "Open bucket";
+    name.addEventListener("click", () => openBucket(b.name));
+    row.querySelector(".s3-date").textContent = fmtDate(b.created);
     const actions = row.querySelector(".s3-row-actions");
-    const view = document.createElement("button");
-    view.className = "btn-mini";
-    view.textContent = "View";
-    view.addEventListener("click", () => openViewer(o));
-    const dl = document.createElement("a");
+    const dl = document.createElement("button");
     dl.className = "btn-mini";
     dl.textContent = "Download";
-    dl.href = objectUrl(o.key, true);
-    dl.setAttribute("download", o.name);
-    actions.appendChild(view);
+    dl.title = "Download the whole bucket";
+    dl.addEventListener("click", (ev) => { ev.stopPropagation(); downloadFolder(b.name, ""); });
     actions.appendChild(dl);
     els.list.appendChild(row);
   });
+
+  renderPager({
+    label: `Buckets ${start + 1}–${start + page.length} of ${total}`,
+    canPrev: state.bucketPage > 0,
+    canNext: start + per < total,
+    onPrev: () => { state.bucketPage--; renderBuckets(); },
+    onNext: () => { state.bucketPage++; renderBuckets(); },
+  });
+  setStatus(`${total} bucket(s)${state.filter ? " (filtered)" : ""}`, "muted");
 }
 
-function makeRow() {
-  return $("#row-tpl").content.firstElementChild.cloneNode(true);
+function openBucket(name) {
+  state.bucket = name;
+  state.prefix = "";
+  state.filter = "";
+  els.filter.value = "";
+  resetObjectPaging();
+  loadObjects(0);
 }
+
+/* ---------- objects view ---------- */
+
+function resetObjectPaging() {
+  state.tokenStack = [""];
+  state.pageIndex = 0;
+  state.nextToken = "";
+}
+
+async function loadObjects(pageIndex) {
+  state.view = "objects";
+  els.download.classList.remove("hidden");
+  renderBreadcrumb();
+  setStatus("Loading…");
+  const token = state.tokenStack[pageIndex] ?? "";
+  try {
+    const data = await api("/api/s3/list", {
+      profile: state.profile, bucket: state.bucket, prefix: state.prefix, token, max: state.pageSize,
+    });
+    state.pageIndex = pageIndex;
+    state.nextToken = data.next_token || "";
+    if (state.nextToken && state.tokenStack[pageIndex + 1] === undefined) {
+      state.tokenStack[pageIndex + 1] = state.nextToken;
+    }
+    renderObjects(data);
+  } catch (e) {
+    els.list.innerHTML = "";
+    els.pager.innerHTML = "";
+    setStatus(s3Error(e), "err");
+  }
+}
+
+function renderObjects(data) {
+  const prefixes = data.prefixes || [];
+  const objects = data.objects || [];
+  els.list.innerHTML = "";
+
+  if (prefixes.length === 0 && objects.length === 0) {
+    showEmpty("This folder is empty.");
+  } else {
+    prefixes.forEach((p) => {
+      const name = p.slice(state.prefix.length).replace(/\/$/, "");
+      const row = makeRow();
+      row.dataset.name = name.toLowerCase();
+      row.querySelector(".s3-icon").textContent = "📁";
+      const nm = row.querySelector(".s3-name");
+      nm.textContent = name + "/";
+      nm.classList.add("is-folder");
+      nm.addEventListener("click", () => { state.prefix = p; resetObjectPaging(); loadObjects(0); });
+      els.list.appendChild(row);
+    });
+    objects.forEach((o) => {
+      const kind = fileKind(o.name);
+      const row = makeRow();
+      row.dataset.name = o.name.toLowerCase();
+      row.querySelector(".s3-icon").textContent = kindIcon(kind);
+      const nm = row.querySelector(".s3-name");
+      nm.textContent = o.name;
+      nm.title = "Open";
+      nm.addEventListener("click", () => openViewer(o));
+      row.querySelector(".s3-size").textContent = fmtSize(o.size);
+      row.querySelector(".s3-date").textContent = fmtDate(o.modified);
+      const actions = row.querySelector(".s3-row-actions");
+      const view = document.createElement("button");
+      view.className = "btn-mini";
+      view.textContent = "View";
+      view.addEventListener("click", () => openViewer(o));
+      const dl = document.createElement("a");
+      dl.className = "btn-mini";
+      dl.textContent = "Download";
+      dl.href = objectUrl(o.key, true);
+      dl.setAttribute("download", o.name);
+      actions.appendChild(view);
+      actions.appendChild(dl);
+      els.list.appendChild(row);
+    });
+  }
+
+  const n = prefixes.length + objects.length;
+  renderPager({
+    label: `Page ${state.pageIndex + 1}${state.nextToken ? "" : " (last)"} · ${n} item${n === 1 ? "" : "s"} on this page`,
+    canPrev: state.pageIndex > 0,
+    canNext: !!state.nextToken,
+    onPrev: () => loadObjects(state.pageIndex - 1),
+    onNext: () => loadObjects(state.pageIndex + 1),
+  });
+  applyObjectFilter();
+  setStatus(`${state.bucket}/${state.prefix}`, "muted");
+}
+
+/* ---------- breadcrumb + pager + filter ---------- */
 
 function renderBreadcrumb() {
   els.crumb.innerHTML = "";
   const root = document.createElement("button");
   root.className = "crumb";
-  root.textContent = state.bucket || "(bucket)";
-  root.addEventListener("click", () => { state.prefix = ""; loadList(); });
+  root.textContent = "All buckets";
+  root.addEventListener("click", () => { state.filter = ""; els.filter.value = ""; loadBuckets(); });
   els.crumb.appendChild(root);
+  if (state.view === "buckets") return;
+
+  crumbSep();
+  const bkt = document.createElement("button");
+  bkt.className = "crumb";
+  bkt.textContent = state.bucket;
+  bkt.addEventListener("click", () => { state.prefix = ""; resetObjectPaging(); loadObjects(0); });
+  els.crumb.appendChild(bkt);
 
   let acc = "";
   state.prefix.split("/").filter(Boolean).forEach((seg) => {
     acc += seg + "/";
-    const sep = document.createElement("span");
-    sep.className = "crumb-sep";
-    sep.textContent = "/";
-    els.crumb.appendChild(sep);
+    crumbSep();
     const b = document.createElement("button");
     b.className = "crumb";
     b.textContent = seg;
     const here = acc;
-    b.addEventListener("click", () => { state.prefix = here; loadList(); });
+    b.addEventListener("click", () => { state.prefix = here; resetObjectPaging(); loadObjects(0); });
     els.crumb.appendChild(b);
+  });
+}
+
+function crumbSep() {
+  const s = document.createElement("span");
+  s.className = "crumb-sep";
+  s.textContent = "/";
+  els.crumb.appendChild(s);
+}
+
+function renderPager({ label, canPrev, canNext, onPrev, onNext }) {
+  els.pager.innerHTML = "";
+  const prev = document.createElement("button");
+  prev.className = "btn-mini";
+  prev.textContent = "‹ Prev";
+  prev.disabled = !canPrev;
+  prev.addEventListener("click", onPrev);
+  const info = document.createElement("span");
+  info.className = "pager-info";
+  info.textContent = label;
+  const next = document.createElement("button");
+  next.className = "btn-mini";
+  next.textContent = "Next ›";
+  next.disabled = !canNext;
+  next.addEventListener("click", onNext);
+  els.pager.appendChild(prev);
+  els.pager.appendChild(info);
+  els.pager.appendChild(next);
+}
+
+function onFilterInput() {
+  state.filter = els.filter.value;
+  if (state.view === "buckets") {
+    state.bucketPage = 0;
+    renderBuckets();
+  } else {
+    applyObjectFilter();
+  }
+}
+
+function applyObjectFilter() {
+  const f = state.filter.trim().toLowerCase();
+  els.list.querySelectorAll(".s3-row").forEach((row) => {
+    const name = row.dataset.name || "";
+    row.style.display = !f || name.includes(f) ? "" : "none";
   });
 }
 
@@ -271,11 +401,10 @@ function closeViewer() {
   $("#viewer-body").innerHTML = "";
 }
 
-/* ---------- folder download ---------- */
+/* ---------- folder/bucket download ---------- */
 
-async function downloadFolder() {
-  if (!state.bucket) return;
-  const where = state.prefix ? `${state.bucket}/${state.prefix}` : `the whole bucket "${state.bucket}"`;
+async function downloadFolder(bucket, prefix) {
+  const where = prefix ? `${bucket}/${prefix}` : `the whole bucket "${bucket}"`;
   if (!confirm(`Download ${where} to your local Downloads folder?`)) return;
   const panel = $("#dl-panel");
   panel.classList.remove("hidden");
@@ -283,7 +412,7 @@ async function downloadFolder() {
   $("#dl-info").textContent = "";
   $("#dl-log").textContent = "";
   try {
-    const { job, dest } = await api("/api/s3/download", { profile: state.profile, bucket: state.bucket, prefix: state.prefix });
+    const { job, dest } = await api("/api/s3/download", { profile: state.profile, bucket, prefix });
     $("#dl-title").textContent = "Downloading…";
     $("#dl-info").textContent = "→ " + dest;
     pollDownload(job, dest);
@@ -323,6 +452,17 @@ function pollDownload(job, dest) {
 }
 
 /* ---------- helpers ---------- */
+
+function makeRow() {
+  return $("#row-tpl").content.firstElementChild.cloneNode(true);
+}
+
+function showEmpty(msg) {
+  const empty = document.createElement("div");
+  empty.className = "s3-empty";
+  empty.textContent = msg;
+  els.list.appendChild(empty);
+}
 
 function fileKind(name) {
   const ext = (name.split(".").pop() || "").toLowerCase();
@@ -376,9 +516,9 @@ function toast(kind, title, detail) {
 /* ---------- wire up ---------- */
 
 els.account.addEventListener("change", onAccountChange);
-els.bucket.addEventListener("change", onBucketChange);
-$("#reload-btn").addEventListener("click", loadList);
-$("#download-folder").addEventListener("click", downloadFolder);
+els.filter.addEventListener("input", onFilterInput);
+$("#reload-btn").addEventListener("click", () => (state.view === "buckets" ? loadBuckets() : loadObjects(state.pageIndex)));
+els.download.addEventListener("click", () => downloadFolder(state.bucket, state.prefix));
 $("#viewer-close").addEventListener("click", closeViewer);
 viewer.addEventListener("click", (ev) => { if (ev.target === viewer) closeViewer(); });
 $("#dl-close").addEventListener("click", () => $("#dl-panel").classList.add("hidden"));

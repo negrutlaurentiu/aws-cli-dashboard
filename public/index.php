@@ -350,10 +350,12 @@ function s3List(App $app): void
     $profile = trim((string) ($b['profile'] ?? ''));
     $bucket = trim((string) ($b['bucket'] ?? ''));
     $prefix = (string) ($b['prefix'] ?? '');
+    $token = (string) ($b['token'] ?? '');
+    $max = (int) ($b['max'] ?? 200);
     if ($profile === '' || $bucket === '') {
         $app->fail(400, 'Missing profile or bucket.');
     }
-    $app->json(['ok' => true] + (new S3($app->awsBin))->listObjects($profile, $bucket, $prefix));
+    $app->json(['ok' => true] + (new S3($app->awsBin))->listObjects($profile, $bucket, $prefix, $token, $max));
 }
 
 /** Stream a single object with strict, script-free headers (view inline or download). */

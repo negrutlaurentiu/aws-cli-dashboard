@@ -30,22 +30,29 @@ final class S3
 
     /**
      * List one "folder" level under $prefix using the delimiter, so navigation is folder-like.
+     * Paginates via the aws CLI's --max-items / --starting-token (folders + files count
+     * together toward the page size); $startingToken is the opaque NextToken from a prior page.
      *
-     * @return array{prefixes:array<int,string>,objects:array<int,array{key:string,name:string,size:int,modified:?string}>,truncated:bool}
+     * @return array{prefixes:array<int,string>,objects:array<int,array{key:string,name:string,size:int,modified:?string}>,next_token:string}
      */
-    public function listObjects(string $profile, string $bucket, string $prefix): array
+    public function listObjects(string $profile, string $bucket, string $prefix, string $startingToken = '', int $maxItems = 200): array
     {
+        $maxItems = max(10, min(1000, $maxItems));
         $args = [
             's3api', 'list-objects-v2',
             '--bucket', $bucket,
             '--delimiter', '/',
-            '--max-items', '2000',
+            '--max-items', (string) $maxItems,
             '--profile', $profile,
             '--output', 'json',
         ];
         if ($prefix !== '') {
             $args[] = '--prefix';
             $args[] = $prefix;
+        }
+        if ($startingToken !== '') {
+            $args[] = '--starting-token';
+            $args[] = $startingToken;
         }
         $out = $this->json($args, $profile);
 
@@ -76,7 +83,7 @@ final class S3
         return [
             'prefixes' => $prefixes,
             'objects' => $objects,
-            'truncated' => !empty($out['NextToken']) || !empty($out['NextContinuationToken']),
+            'next_token' => (string) ($out['NextToken'] ?? ''),
         ];
     }
 
