@@ -76,23 +76,26 @@ final class Tasks
 
     // ---- mutations --------------------------------------------------------
 
-    public function create(string $title, string $description): array
+    public function create(string $title, string $description, string $status = 'pending'): array
     {
         $lock = $this->acquireLock();
         $title = trim($title);
         if ($title === '') {
             throw new \InvalidArgumentException('Task title is required.');
         }
+        if (!in_array($status, self::STATUSES, true)) {
+            $status = 'pending';
+        }
         $nowIso = gmdate('c');
         $task = [
             'id' => 't-' . bin2hex(random_bytes(6)),
             'title' => $title,
             'description' => trim($description),
-            'status' => 'pending',
+            'status' => $status,
             'created_at' => $nowIso,
             'updated_at' => $nowIso,
             'status_since' => $nowIso,
-            'history' => [['status' => 'pending', 'at' => $nowIso]],
+            'history' => [['status' => $status, 'at' => $nowIso]],
             'sessions' => [],
             'timer_started' => null,
             'attachments' => [],

@@ -122,7 +122,11 @@ try {
         case $method === 'POST' && $path === '/api/tasks':
             $app->assertCsrf();
             $tb = $app->jsonBody();
-            $app->json(['ok' => true, 'task' => $app->tasks->create((string) ($tb['title'] ?? ''), (string) ($tb['description'] ?? ''))]);
+            $app->json(['ok' => true, 'task' => $app->tasks->create(
+                (string) ($tb['title'] ?? ''),
+                (string) ($tb['description'] ?? ''),
+                (string) ($tb['status'] ?? 'pending')
+            )]);
             break;
 
         case $method === 'POST' && $path === '/api/tasks/update':

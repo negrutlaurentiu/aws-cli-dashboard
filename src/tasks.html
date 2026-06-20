@@ -96,8 +96,17 @@
   <div id="toasts" class="toasts" aria-live="assertive"></div>
 
   <template id="column-tpl">
-    <div class="board-col" >
-      <div class="col-head"><span class="col-name"></span><span class="col-count"></span></div>
+    <div class="board-col">
+      <div class="col-head">
+        <span class="col-name"></span>
+        <span class="col-head-right">
+          <span class="col-count"></span>
+          <button class="col-add" title="Add a task in this column" aria-label="Add task">+</button>
+        </span>
+      </div>
+      <div class="col-compose hidden">
+        <input class="col-compose-input" placeholder="Task title — Enter to add, Esc to close" aria-label="New task title">
+      </div>
       <div class="col-list"></div>
     </div>
   </template>

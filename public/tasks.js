@@ -17,6 +17,7 @@ const state = {
   loadedAt: 0,        // Date.now() at last load, for live extrapolation
   detailId: null,
   weekOffset: 0,
+  composeStatus: null, // which column's inline quick-add is open
 };
 
 /* ---------- api ---------- */
@@ -65,6 +66,7 @@ async function loadTasks() {
 function renderBoard() {
   const board = $("#board");
   board.innerHTML = "";
+  let focusInput = null;
   STATUSES.forEach((st) => {
     const col = $("#column-tpl").content.firstElementChild.cloneNode(true);
     col.dataset.status = st.key;
@@ -75,8 +77,28 @@ function renderBoard() {
     const list = $(".col-list", col);
     items.forEach((t) => list.appendChild(buildCard(t)));
 
-    col.addEventListener("dragover", (ev) => { ev.preventDefault(); col.classList.add("drag-over"); });
-    col.addEventListener("dragleave", () => col.classList.remove("drag-over"));
+    // inline quick-add composer (per column)
+    const compose = $(".col-compose", col);
+    const input = $(".col-compose-input", col);
+    $(".col-add", col).addEventListener("click", () => {
+      state.composeStatus = state.composeStatus === st.key ? null : st.key;
+      renderBoard();
+    });
+    if (state.composeStatus === st.key) { compose.classList.remove("hidden"); focusInput = input; }
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); const v = input.value.trim(); if (v) quickAdd(v, st.key); }
+      else if (ev.key === "Escape") { state.composeStatus = null; renderBoard(); }
+    });
+
+    // drag-and-drop target
+    col.addEventListener("dragover", (ev) => {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = "move";
+      col.classList.add("drag-over");
+    });
+    col.addEventListener("dragleave", (ev) => {
+      if (!col.contains(ev.relatedTarget)) col.classList.remove("drag-over");
+    });
     col.addEventListener("drop", (ev) => {
       ev.preventDefault();
       col.classList.remove("drag-over");
@@ -85,6 +107,7 @@ function renderBoard() {
     });
     board.appendChild(col);
   });
+  if (focusInput) focusInput.focus();
   tick();
 }
 
@@ -145,6 +168,16 @@ async function moveTask(id, status) {
     loadTasks();
   } catch (e) {
     toast("err", "Couldn't move task", e.message);
+  }
+}
+
+async function quickAdd(title, status) {
+  try {
+    await api("/api/tasks", { title, status });
+    state.composeStatus = status; // keep this column's composer open for rapid entry
+    await loadTasks();            // re-renders and refocuses the composer input
+  } catch (e) {
+    toast("err", "Couldn't add task", e.message);
   }
 }
 
