@@ -1,0 +1,121 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+namespace AwsDash;
+
+/**
+ * Terminal companion to the dashboard. Same engine, no browser.
+ *
+ *   bin/aws-mfa                 # list configured accounts
+ *   bin/aws-mfa <id|label>      # refresh that account (stored secret or prompt for code)
+ *   bin/aws-mfa <id> 123456     # refresh using an explicit MFA code
+ *   bin/aws-mfa --all           # refresh every account that has a stored MFA secret
+ */
+
+require __DIR__ . '/../src/bootstrap.php';
+
+$app = new App();
+$store = $app->store;
+$argv = $_SERVER['argv'];
+$cmd = $argv[1] ?? null;
+
+function out(string $s): void { fwrite(STDOUT, $s . "\n"); }
+function err(string $s): void { fwrite(STDERR, $s . "\n"); }
+
+function refreshAccount(App $app, array $acc, ?string $code): bool
+{
+    $label = $acc['label'] ?? $acc['id'];
+    if ($code === null || $code === '') {
+        if (!empty($acc['totp_secret'])) {
+            $code = Totp::generate((string) $acc['totp_secret'])['code'];
+            out("  · generated MFA code from stored secret");
+        } else {
+            $code = trim((string) readline("  MFA code for {$label}: "));
+        }
+    }
+    if (!preg_match('/^\d{6,8}$/', (string) $code)) {
+        err("  ✖ invalid MFA code");
+        return false;
+    }
+
+    try {
+        $sts = new Sts($app->awsBin);
+        $creds = $sts->getSessionToken(
+            (string) $acc['mfa_serial'],
+            (string) $acc['source_profile'],
+            (string) $code,
+            (int) ($acc['duration_seconds'] ?? 129600)
+        );
+        $target = (string) $acc['target_profile'];
+        $app->withCredentialsLock(function () use ($app, $target, $creds, $acc): void {
+            $file = new CredentialsFile($app->credentialsPath);
+            $file->setProfile($target, [
+                'aws_access_key_id' => $creds['AccessKeyId'],
+                'aws_secret_access_key' => $creds['SecretAccessKey'],
+                'aws_session_token' => $creds['SessionToken'],
+            ]);
+            if (!empty($acc['region'])) {
+                $file->setProfile($target, ['region' => (string) $acc['region']]);
+            }
+            $file->save();
+        });
+        $app->store->recordSession((string) $acc['id'], $target, $creds['Expiration']);
+        out("  ✓ {$label}: wrote profile [{$target}], valid until {$creds['Expiration']}");
+        return true;
+    } catch (\Throwable $e) {
+        err("  ✖ {$label}: " . $e->getMessage());
+        return false;
+    }
+}
+
+$accounts = $store->accounts();
+
+if ($cmd === null || $cmd === '--list' || $cmd === '-l') {
+    if ($accounts === []) {
+        out("No accounts configured. Add some in the dashboard, or edit config/accounts.json.");
+        exit(0);
+    }
+    out("Configured accounts:");
+    foreach ($accounts as $a) {
+        $secret = !empty($a['totp_secret']) ? '🔑' : '⌨';
+        $session = $store->sessionFor((string) $a['id']);
+        $exp = $session['expiration'] ?? null;
+        $status = $exp ? ('expires ' . $exp) : 'no session';
+        out(sprintf("  %s  %-18s %s → %s   (%s)", $secret, $a['id'], $a['source_profile'], $a['target_profile'], $status));
+    }
+    out("\nUsage: bin/aws-mfa <id> [code]   |   bin/aws-mfa --all");
+    exit(0);
+}
+
+if ($cmd === '--all' || $cmd === '-a') {
+    $any = array_filter($accounts, static fn ($a) => !empty($a['totp_secret']));
+    if ($any === []) {
+        out("No accounts have a stored MFA secret to refresh automatically.");
+        exit(0);
+    }
+    $ok = true;
+    foreach ($any as $a) {
+        out("Refreshing {$a['label']}…");
+        $ok = refreshAccount($app, $a, null) && $ok;
+    }
+    exit($ok ? 0 : 1);
+}
+
+// match by id or label (case-insensitive)
+$match = null;
+foreach ($accounts as $a) {
+    if (strcasecmp((string) $a['id'], $cmd) === 0 || strcasecmp((string) ($a['label'] ?? ''), $cmd) === 0) {
+        $match = $a;
+        break;
+    }
+}
+if ($match === null) {
+    err("Unknown account: {$cmd}");
+    err("Run 'bin/aws-mfa --list' to see configured accounts.");
+    exit(1);
+}
+
+out("Refreshing {$match['label']}…");
+exit(refreshAccount($app, $match, $argv[2] ?? null) ? 0 : 1);

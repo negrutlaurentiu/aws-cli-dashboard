@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="__APP_TOKEN__">
+  <title>AWS CLI Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%91%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">aws</span>
+      <div class="brand-text">
+        <h1>CLI Dashboard</h1>
+        <p>MFA session-token manager &middot; <code>__HOST__:__PORT__</code></p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span class="lock-pill" title="Bound to localhost only">&#128274; localhost only</span>
+      <button class="btn btn-ghost" id="refresh-all">Refresh all stored-MFA</button>
+      <button class="btn btn-primary" id="add-account">+ Add account</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="empty-state" class="empty hidden">
+      <div class="empty-card">
+        <div class="empty-glyph">&#9729;</div>
+        <h2>No accounts yet</h2>
+        <p>Add an AWS profile that uses MFA. Store the MFA secret for one-click refresh, or
+           enter the 6-digit code by hand each time.</p>
+        <button class="btn btn-primary" id="add-account-empty">+ Add your first account</button>
+      </div>
+    </section>
+
+    <section id="grid" class="grid" aria-live="polite"></section>
+  </main>
+
+  <!-- Account editor -->
+  <div class="modal-backdrop hidden" id="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-head">
+        <h2 id="modal-title">Add account</h2>
+        <button class="icon-btn" id="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <form id="account-form" autocomplete="off" spellcheck="false">
+        <input type="hidden" name="id">
+        <div class="field">
+          <label>Label</label>
+          <input name="label" placeholder="Mobility Plus" required>
+          <span class="hint">A friendly name for this account.</span>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Source profile</label>
+            <input name="source_profile" list="profiles" placeholder="MobilityPlus" required>
+            <span class="hint">Profile holding the long-term keys.</span>
+          </div>
+          <div class="field">
+            <label>Target profile</label>
+            <input name="target_profile" list="profiles" placeholder="mp-temp">
+            <span class="hint">Where temp creds are written (defaults to source).</span>
+          </div>
+        </div>
+        <datalist id="profiles"></datalist>
+        <div class="field">
+          <label>MFA serial (ARN)</label>
+          <input name="mfa_serial" placeholder="arn:aws:iam::123456789012:mfa/your-name" required>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Duration (seconds)</label>
+            <input name="duration_seconds" type="number" min="900" max="129600" value="129600">
+            <span class="hint">900&ndash;129600 (max 36h).</span>
+          </div>
+          <div class="field">
+            <label>Region <span class="opt">optional</span></label>
+            <input name="region" placeholder="us-east-1">
+          </div>
+        </div>
+        <div class="field">
+          <label>MFA secret (base32) <span class="opt">optional</span></label>
+          <input name="totp_secret" type="password" placeholder="JBSWY3DPEHPK3PXP… leave blank to type codes manually">
+          <span class="hint warn">Stored locally in plaintext. Storing it turns MFA into a single
+            factor on this machine &mdash; leave blank for highest security.</span>
+          <label class="check-row" id="clear-secret-row" hidden>
+            <input type="checkbox" name="clear_secret"> Forget the stored secret (switch to manual codes)
+          </label>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" id="modal-cancel">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="modal-save">Save account</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+
+  <template id="card-tpl">
+    <article class="card">
+      <div class="card-top">
+        <div class="card-id">
+          <h3 class="card-label"></h3>
+          <div class="profiles">
+            <span class="chip src"></span>
+            <span class="arrow">&rarr;</span>
+            <span class="chip dst"></span>
+          </div>
+        </div>
+        <div class="card-menu">
+          <button class="icon-btn edit" title="Edit" aria-label="Edit">&#9881;</button>
+          <button class="icon-btn del" title="Delete" aria-label="Delete">&#128465;</button>
+        </div>
+      </div>
+
+      <div class="status-row">
+        <span class="status-dot"></span>
+        <span class="status-text"></span>
+      </div>
+
+      <div class="totp-area">
+        <div class="ring-wrap">
+          <svg class="ring" viewBox="0 0 44 44" aria-hidden="true">
+            <circle class="ring-bg" cx="22" cy="22" r="19"></circle>
+            <circle class="ring-fg" cx="22" cy="22" r="19"></circle>
+          </svg>
+          <span class="ring-secs"></span>
+        </div>
+        <div class="totp-code-wrap">
+          <button class="totp-code" title="Copy code"><span class="totp-digits">––– –––</span></button>
+          <span class="totp-cap">live MFA code &middot; tap to copy</span>
+        </div>
+      </div>
+
+      <div class="manual-area">
+        <input class="manual-code" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="8" placeholder="000000" aria-label="MFA code">
+      </div>
+
+      <div class="serial" title="MFA serial"></div>
+
+      <button class="btn btn-refresh">Refresh credentials</button>
+      <div class="card-result"></div>
+    </article>
+  </template>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

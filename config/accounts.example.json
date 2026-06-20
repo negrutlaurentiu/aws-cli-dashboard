@@ -1,0 +1,14 @@
+{
+  "accounts": [
+    {
+      "id": "mobilityplus",
+      "label": "Mobility Plus",
+      "source_profile": "MobilityPlus",
+      "target_profile": "mp-temp",
+      "mfa_serial": "arn:aws:iam::111122223333:mfa/your-device-name",
+      "duration_seconds": 129600,
+      "region": "us-east-1",
+      "totp_secret": ""
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+# Local config & runtime state — may contain MFA secrets and session info. Never commit.
+/config/accounts.json
+/config/state.json
+/config/*.local.json
+
+# Never commit anything resembling real AWS credentials
+credentials
+credentials.bak
+*.pem
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
