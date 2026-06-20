@@ -16,14 +16,52 @@ final class Store
 {
     private string $accountsPath;
     private string $statePath;
+    private string $settingsPath;
+
+    /** AWS STS get-session-token allows 900s (15 min) to 129600s (36 h) for an IAM user. */
+    public const MIN_DURATION = 900;
+    public const MAX_DURATION = 129600;
+    public const DEFAULT_DURATION = 129600;
 
     public function __construct(string $configDir)
     {
         $this->accountsPath = $configDir . '/accounts.json';
         $this->statePath = $configDir . '/state.json';
+        $this->settingsPath = $configDir . '/settings.json';
         if (!is_dir($configDir)) {
             mkdir($configDir, 0700, true);
         }
+    }
+
+    // ---- global settings --------------------------------------------------
+
+    /** @return array{duration_seconds:int} global settings shared by every account */
+    public function settings(): array
+    {
+        $s = $this->readJson($this->settingsPath);
+        $dur = (int) ($s['duration_seconds'] ?? self::DEFAULT_DURATION);
+        if ($dur < self::MIN_DURATION || $dur > self::MAX_DURATION) {
+            $dur = self::DEFAULT_DURATION;
+        }
+        return ['duration_seconds' => $dur];
+    }
+
+    public function durationSeconds(): int
+    {
+        return $this->settings()['duration_seconds'];
+    }
+
+    /** @param array<string,mixed> $input @return array{duration_seconds:int} */
+    public function saveSettings(array $input): array
+    {
+        $dur = (int) ($input['duration_seconds'] ?? self::DEFAULT_DURATION);
+        if ($dur < self::MIN_DURATION || $dur > self::MAX_DURATION) {
+            throw new \InvalidArgumentException(
+                'Token lifetime must be between ' . self::MIN_DURATION . ' and ' . self::MAX_DURATION . ' seconds.'
+            );
+        }
+        $this->writeJson($this->settingsPath, ['duration_seconds' => $dur]);
+        return $this->settings();
     }
 
     // ---- accounts ---------------------------------------------------------

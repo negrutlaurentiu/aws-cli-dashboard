@@ -22,7 +22,21 @@ try {
             break;
 
         case $method === 'GET' && $path === '/api/accounts':
-            $app->json(['ok' => true, 'now' => time(), 'accounts' => accountViews($app)]);
+            $app->json([
+                'ok' => true,
+                'now' => time(),
+                'duration_seconds' => $app->store->durationSeconds(),
+                'accounts' => accountViews($app),
+            ]);
+            break;
+
+        case $method === 'GET' && $path === '/api/settings':
+            $app->json(['ok' => true, 'settings' => $app->store->settings()]);
+            break;
+
+        case $method === 'POST' && $path === '/api/settings':
+            $app->assertCsrf();
+            $app->json(['ok' => true, 'settings' => $app->store->saveSettings($app->jsonBody())]);
             break;
 
         case $method === 'GET' && $path === '/api/profiles':
@@ -183,7 +197,7 @@ function refresh(App $app): void
         (string) $account['mfa_serial'],
         (string) $account['source_profile'],
         $code,
-        (int) $account['duration_seconds']
+        $app->store->durationSeconds() // global token lifetime, shared by all accounts
     );
 
     $target = (string) $account['target_profile'];

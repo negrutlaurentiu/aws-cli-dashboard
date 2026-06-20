@@ -46,7 +46,7 @@ function refreshAccount(App $app, array $acc, ?string $code): bool
             (string) $acc['mfa_serial'],
             (string) $acc['source_profile'],
             (string) $code,
-            (int) ($acc['duration_seconds'] ?? 129600)
+            $app->store->durationSeconds() // global token lifetime, shared by all accounts
         );
         $target = (string) $acc['target_profile'];
         $app->withCredentialsLock(function () use ($app, $target, $creds, $acc): void {

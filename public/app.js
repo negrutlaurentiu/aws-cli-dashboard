@@ -2,6 +2,7 @@
 
 const TOKEN = document.querySelector('meta[name="csrf-token"]').content;
 const RING_CIRC = 2 * Math.PI * 19; // matches r=19 in the SVG
+let globalDuration = 129600; // token lifetime in seconds, shared by all accounts
 
 const state = {
   serverOffset: 0, // serverUnixMs - clientUnixMs
@@ -40,6 +41,11 @@ async function loadAccounts() {
   try {
     const data = await api("/api/accounts");
     state.serverOffset = data.now * 1000 - Date.now();
+    if (data.duration_seconds) {
+      globalDuration = data.duration_seconds;
+      const ds = $("#duration-select");
+      if (ds && !ds.matches(":focus")) ds.value = String(globalDuration);
+    }
     reconcile(data.accounts || []);
   } catch (e) {
     toast("err", "Couldn't load accounts", e.message);
@@ -97,6 +103,25 @@ function applyAccountFilter() {
   grid.querySelectorAll(".card").forEach((el) => {
     el.style.display = sel === "all" || el.dataset.id === sel ? "" : "none";
   });
+}
+
+/* ---------- global token-lifetime setting ---------- */
+
+async function saveDuration() {
+  const val = Number($("#duration-select").value);
+  try {
+    await api("/api/settings", { method: "POST", body: { duration_seconds: val } });
+    globalDuration = val;
+    toast("ok", "Token lifetime updated", durationLabel(val) + " — applies to all accounts");
+    loadAccounts(); // refresh the command snippets with the new --duration-seconds
+  } catch (e) {
+    toast("err", "Couldn't update token lifetime", e.message);
+  }
+}
+
+function durationLabel(s) {
+  const opt = [...$("#duration-select").options].find((o) => Number(o.value) === Number(s));
+  return opt ? opt.textContent : s + "s";
 }
 
 function buildCard(acc) {
@@ -354,7 +379,7 @@ function renderCommands(el, acc) {
   const T = acc.target_profile;
   const S = acc.source_profile;
   const arn = acc.mfa_serial;
-  const dur = acc.duration_seconds;
+  const dur = globalDuration;
 
   const items = [
     ["Verify identity / check the creds", `aws sts get-caller-identity --profile ${T}`],
@@ -474,7 +499,6 @@ async function openModal(acc) {
     form.source_profile.value = acc.source_profile;
     form.target_profile.value = acc.target_profile;
     form.mfa_serial.value = acc.mfa_serial;
-    form.duration_seconds.value = acc.duration_seconds;
     form.region.value = acc.region || "";
     form.totp_secret.placeholder = acc.has_secret
       ? "•••••• stored — leave blank to keep"
@@ -500,7 +524,6 @@ form.addEventListener("submit", async (ev) => {
     source_profile: form.source_profile.value,
     target_profile: form.target_profile.value,
     mfa_serial: form.mfa_serial.value,
-    duration_seconds: Number(form.duration_seconds.value),
     region: form.region.value,
     totp_secret: form.totp_secret.value,
     clear_secret: form.clear_secret.checked,
@@ -583,6 +606,7 @@ $("#add-account").addEventListener("click", () => openModal());
 $("#add-account-empty").addEventListener("click", () => openModal());
 $("#refresh-all").addEventListener("click", refreshAllStored);
 acctFilter.addEventListener("change", applyAccountFilter);
+$("#duration-select").addEventListener("change", saveDuration);
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-cancel").addEventListener("click", closeModal);
 $("#dp-recheck").addEventListener("click", loadDefaultPanel);
