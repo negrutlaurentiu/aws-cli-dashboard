@@ -44,4 +44,6 @@ fi
 
 # Multiple workers so streaming a file or running an S3 download doesn't block the UI.
 export PHP_CLI_SERVER_WORKERS="${PHP_CLI_SERVER_WORKERS:-8}"
-exec php -S "$HOST:$PORT" -t "$DIR/public" "$DIR/public/router.php"
+# Allow reasonably large task attachments (screenshots, PDFs).
+exec php -d upload_max_filesize=64M -d post_max_size=66M \
+  -S "$HOST:$PORT" -t "$DIR/public" "$DIR/public/router.php"

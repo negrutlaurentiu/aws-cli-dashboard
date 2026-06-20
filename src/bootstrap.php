@@ -9,6 +9,7 @@ require __DIR__ . '/CredentialsFile.php';
 require __DIR__ . '/Sts.php';
 require __DIR__ . '/Store.php';
 require __DIR__ . '/S3.php';
+require __DIR__ . '/Tasks.php';
 
 /**
  * Shared configuration + security helpers for the dashboard. Everything here assumes a
@@ -26,7 +27,9 @@ final class App
     public string $credentialsPath;
     public string $awsConfigPath;
     public string $downloadsRoot;
+    public string $taskFilesDir;
     public Store $store;
+    public Tasks $tasks;
     public string $awsBin;
 
     public function __construct()
@@ -40,8 +43,10 @@ final class App
         $this->awsConfigPath = getenv('AWS_CONFIG_FILE') ?: ($this->awsDir . '/config');
         // S3 folder/bucket downloads are confined under here, never an arbitrary path.
         $this->downloadsRoot = $home . '/Downloads/aws-cli-dashboard';
+        $this->taskFilesDir = $this->projectDir . '/data/task-files';
 
         $this->store = new Store($this->configDir);
+        $this->tasks = new Tasks($this->configDir, $this->taskFilesDir);
         $this->awsBin = $this->resolveAwsBin();
     }
 

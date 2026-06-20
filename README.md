@@ -39,6 +39,10 @@ No frameworks, no build step, no `node_modules` — just PHP's built-in server a
 - **S3 browser** (`/s3`) — pick an account, browse buckets and folders, **preview** images,
   PDFs and text inline, **download** a single file, or **download a whole bucket/prefix** to
   `~/Downloads/aws-cli-dashboard`.
+- **Task board** (`/tasks`) — a Kanban board (pending / in progress / review / done / archived)
+  with drag-and-drop, a per-task **work timer**, **time-in-status** tracking, file
+  **attachments** (drop / paste / pick, with inline preview), and a **weekly summary** of what
+  you worked on.
 - **Safe credential writes** — only the target profile's keys are rewritten; every other
   profile, comment and blank line in `~/.aws/credentials` is preserved, and a `.bak` backup
   is made before each write.
@@ -129,6 +133,28 @@ every object response carries `X-Content-Type-Options: nosniff` and a script-fre
 `Content-Security-Policy: default-src 'none'`, and only an allow-list of image/PDF/text types
 is ever shown inline. The viewer endpoint is authenticated with the same per-install token
 (passed as a query param so `<img>`/`<iframe>` can load it).
+
+## Task board
+
+Open **Tasks** from the top nav (or <http://127.0.0.1:8010/tasks>).
+
+- **Board**: five columns — Pending, In Progress, Review, Done, Archived. **Drag** a card
+  between columns to change its status; the change is timestamped.
+- **Add task**: title + description. Click a card to open its detail (edit title/description,
+  change status, attach files, delete).
+- **Work timer**: each card has a **Start / Stop** timer. Only one timer runs at a time —
+  starting another banks the first one's elapsed time. The top bar shows the live running
+  timer. So if you start work on a task, switch to another, then come back to review one, each
+  task accumulates exactly the time you spent on it.
+- **Timeframes**: every card shows how long it's been in its current status; the detail view
+  breaks down total worked time and time spent in each status (pending / in progress / review …).
+- **Attachments**: drop files onto a task, **paste** a screenshot, or pick files. Images show a
+  thumbnail; click to preview images / PDFs / text inline (others download).
+- **Weekly summary**: the calendar button shows, for any week (prev / next), total time worked,
+  a per-task breakdown, and what you completed and created that week.
+
+Tasks live in `config/tasks.json` and attachments under `data/task-files/` — both local, `0600`,
+and gitignored. Attachments are served with the same script-free hardening as the S3 viewer.
 
 ## Terminal usage
 

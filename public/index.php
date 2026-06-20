@@ -106,6 +106,81 @@ try {
             s3DownloadStatus($app);
             break;
 
+        case $method === 'GET' && $path === '/tasks':
+            renderTasks($app);
+            break;
+
+        case $method === 'GET' && $path === '/api/tasks':
+            $app->json(['ok' => true, 'now' => time(), 'tasks' => $app->tasks->all()]);
+            break;
+
+        case $method === 'GET' && $path === '/api/tasks/summary':
+            $off = (int) ($_GET['week'] ?? 0);
+            $app->json(['ok' => true, 'summary' => $app->tasks->weekSummary(time() + $off * 7 * 86400)]);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks':
+            $app->assertCsrf();
+            $tb = $app->jsonBody();
+            $app->json(['ok' => true, 'task' => $app->tasks->create((string) ($tb['title'] ?? ''), (string) ($tb['description'] ?? ''))]);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks/update':
+            $app->assertCsrf();
+            $tb = $app->jsonBody();
+            $tid = trim((string) ($tb['id'] ?? ''));
+            if ($tid === '') {
+                $app->fail(400, 'Missing task id.');
+            }
+            unset($tb['id']);
+            $app->json(['ok' => true, 'task' => $app->tasks->update($tid, $tb)]);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks/delete':
+            $app->assertCsrf();
+            $tid = trim((string) ($app->jsonBody()['id'] ?? ''));
+            if ($tid === '') {
+                $app->fail(400, 'Missing task id.');
+            }
+            $app->tasks->delete($tid);
+            $app->json(['ok' => true]);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks/timer':
+            $app->assertCsrf();
+            $tb = $app->jsonBody();
+            $tid = trim((string) ($tb['id'] ?? ''));
+            if ($tid === '') {
+                $app->fail(400, 'Missing task id.');
+            }
+            $task = (string) ($tb['action'] ?? '') === 'stop'
+                ? $app->tasks->timerStop($tid)
+                : $app->tasks->timerStart($tid);
+            $app->json(['ok' => true, 'task' => $task]);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks/upload':
+            $app->assertCsrf();
+            taskUpload($app);
+            break;
+
+        case $method === 'GET' && $path === '/api/tasks/file':
+            $app->assertCsrfQuery();
+            taskFile($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks/file-delete':
+            $app->assertCsrf();
+            $tb = $app->jsonBody();
+            $tid = trim((string) ($tb['task_id'] ?? ''));
+            $fid = trim((string) ($tb['file_id'] ?? ''));
+            if ($tid === '' || $fid === '') {
+                $app->fail(400, 'Missing ids.');
+            }
+            $app->tasks->removeAttachment($tid, $fid);
+            $app->json(['ok' => true]);
+            break;
+
         default:
             $app->fail(404, 'Not found: ' . $method . ' ' . $path);
     }
@@ -324,6 +399,11 @@ function renderS3(App $app): never
     renderTemplate($app, 's3.html', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self'; object-src 'self'");
 }
 
+function renderTasks(App $app): never
+{
+    renderTemplate($app, 'tasks.html', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self'; object-src 'self'");
+}
+
 function renderTemplate(App $app, string $file, string $csp): never
 {
     $template = file_get_contents(__DIR__ . '/../src/' . $file);
@@ -472,4 +552,83 @@ function s3Mime(string $key): array
         return ['text/plain; charset=utf-8', true];
     }
     return ['application/octet-stream', false];
+}
+
+// ---- task attachments ------------------------------------------------------
+
+function taskUpload(App $app): void
+{
+    $taskId = trim((string) ($_POST['task_id'] ?? ''));
+    if ($taskId === '') {
+        $app->fail(400, 'Missing task id.');
+    }
+    if (!isset($_FILES['file']) || !is_array($_FILES['file'])) {
+        $app->fail(400, 'No file uploaded.');
+    }
+    $f = $_FILES['file'];
+    $err = (int) ($f['error'] ?? UPLOAD_ERR_NO_FILE);
+    if ($err !== UPLOAD_ERR_OK) {
+        $hint = ($err === UPLOAD_ERR_INI_SIZE || $err === UPLOAD_ERR_FORM_SIZE) ? ' (file too large)' : '';
+        $app->fail(400, 'Upload failed' . $hint . '.');
+    }
+    $meta = $app->tasks->addAttachment(
+        $taskId,
+        (string) $f['tmp_name'],
+        (string) ($f['name'] ?? 'file'),
+        (string) ($f['type'] ?? ''),
+        (int) ($f['size'] ?? 0)
+    );
+    $app->json(['ok' => true, 'attachment' => $meta]);
+}
+
+function taskFile(App $app): void
+{
+    $taskId = trim((string) ($_GET['task_id'] ?? ''));
+    $fileId = trim((string) ($_GET['file_id'] ?? ''));
+    $dl = (string) ($_GET['dl'] ?? '') === '1';
+    if ($taskId === '' || $fileId === '') {
+        http_response_code(400);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Missing parameters.';
+        return;
+    }
+    $att = $app->tasks->attachment($taskId, $fileId);
+    if ($att === null) {
+        http_response_code(404);
+        header('Content-Type: text/plain; charset=utf-8');
+        header('X-Content-Type-Options: nosniff');
+        echo 'Attachment not found.';
+        return;
+    }
+    serveLocalFile($att['path'], (string) ($att['meta']['filename'] ?? 'file'), $dl);
+}
+
+/** Stream a local file with the same script-free hardening as the S3 object viewer. */
+function serveLocalFile(string $path, string $displayName, bool $dl): void
+{
+    [$mime, $inlineSafe] = s3Mime($displayName);
+    $disposition = (!$dl && $inlineSafe) ? 'inline' : 'attachment';
+    $ctype = ($disposition === 'inline') ? $mime : 'application/octet-stream';
+    $filename = preg_replace('/[\r\n"\\\\]+/', '_', $displayName);
+
+    header('Content-Type: ' . $ctype);
+    header('Content-Disposition: ' . $disposition . '; filename="' . $filename . '"');
+    $size = @filesize($path);
+    if ($size !== false) {
+        header('Content-Length: ' . $size);
+    }
+    header('X-Content-Type-Options: nosniff');
+    header("Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
+    header('Cache-Control: no-store');
+
+    $fh = @fopen($path, 'rb');
+    if ($fh === false) {
+        http_response_code(500);
+        return;
+    }
+    while (!feof($fh)) {
+        echo fread($fh, 1 << 16);
+        flush();
+    }
+    fclose($fh);
 }

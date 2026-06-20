@@ -2,7 +2,11 @@
 /config/accounts.json
 /config/state.json
 /config/settings.json
+/config/tasks.json
 /config/*.local.json
+
+# Task attachments (user files / screenshots) — local only
+/data/
 
 # Never commit anything resembling real AWS credentials
 credentials
@@ -15,3 +19,5 @@ credentials.bak
 .vscode/
 *.swp
 *~
+/config/tasks.json.lock
+/config/*.tmp.*

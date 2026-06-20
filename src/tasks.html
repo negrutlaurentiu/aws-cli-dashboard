@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="__APP_TOKEN__">
+  <title>Tasks · AWS CLI Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%85%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">aws</span>
+      <div class="brand-text">
+        <h1>Tasks</h1>
+        <p>board &middot; timers &middot; weekly summary &middot; <code>__HOST__:__PORT__</code></p>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/" class="nav-link">Credentials</a>
+      <a href="/s3" class="nav-link">S3 Browser</a>
+      <a href="/tasks" class="nav-link active">Tasks</a>
+    </nav>
+    <div class="topbar-actions">
+      <span class="now-timer" id="now-timer" title="Active work timer"></span>
+      <button class="btn btn-ghost" id="open-summary">&#128197; Weekly summary</button>
+      <button class="btn btn-primary" id="add-task">+ Add task</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="board" id="board" aria-live="polite"></section>
+  </main>
+
+  <!-- add task -->
+  <div class="modal-backdrop hidden" id="add-modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-title">
+      <div class="modal-head"><h2 id="add-title">New task</h2>
+        <button class="icon-btn" id="add-close" aria-label="Close">&times;</button></div>
+      <form id="add-form" autocomplete="off">
+        <div class="field"><label>Title</label><input name="title" required placeholder="What needs doing?"></div>
+        <div class="field"><label>Description <span class="opt">optional</span></label>
+          <textarea name="description" rows="4" placeholder="Details, links, context…"></textarea></div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" id="add-cancel">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create task</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- task detail -->
+  <div class="modal-backdrop hidden" id="detail-modal">
+    <div class="modal detail-modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <input class="detail-title" id="detail-title" aria-label="Task title">
+        <button class="icon-btn" id="detail-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="detail-body" id="detail-body"></div>
+    </div>
+  </div>
+
+  <!-- weekly summary -->
+  <div class="modal-backdrop hidden" id="summary-modal">
+    <div class="modal summary-modal" role="dialog" aria-modal="true" aria-labelledby="summary-title">
+      <div class="modal-head">
+        <h2 id="summary-title">Weekly summary</h2>
+        <button class="icon-btn" id="summary-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="summary-nav">
+        <button class="btn-mini" id="week-prev">‹ Prev week</button>
+        <span class="week-label" id="week-label"></span>
+        <button class="btn-mini" id="week-next">Next week ›</button>
+      </div>
+      <div class="summary-body" id="summary-body"></div>
+    </div>
+  </div>
+
+  <!-- attachment viewer -->
+  <div class="modal-backdrop hidden" id="viewer">
+    <div class="modal viewer-modal" role="dialog" aria-modal="true" aria-labelledby="viewer-title">
+      <div class="modal-head">
+        <h2 id="viewer-title"></h2>
+        <div class="viewer-head-actions">
+          <a class="btn-mini" id="viewer-download" download>Download</a>
+          <button class="icon-btn" id="viewer-close" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div class="viewer-body" id="viewer-body"></div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+
+  <template id="column-tpl">
+    <div class="board-col" >
+      <div class="col-head"><span class="col-name"></span><span class="col-count"></span></div>
+      <div class="col-list"></div>
+    </div>
+  </template>
+
+  <template id="card-tpl">
+    <article class="task-card" draggable="true">
+      <h4 class="task-title"></h4>
+      <div class="task-meta">
+        <span class="task-since"></span>
+        <span class="task-attach"></span>
+      </div>
+      <div class="task-timer-row">
+        <span class="task-worked"></span>
+        <button class="task-timer btn-mini"></button>
+      </div>
+    </article>
+  </template>
+
+  <script src="/tasks.js" defer></script>
+</body>
+</html>
