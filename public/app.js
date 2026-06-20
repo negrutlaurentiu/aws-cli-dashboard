@@ -83,6 +83,22 @@ function buildCard(acc) {
   $(".mfa-id", el).addEventListener("click", () => { if (el.__arn) copy(el.__arn); });
   $(".test", el).addEventListener("click", () => doTest(el));
   $(".setdef", el).addEventListener("click", () => doSetDefault(el));
+  $(".cmds-toggle", el).addEventListener("click", () => {
+    const cmds = $(".cmds", el);
+    cmds.classList.toggle("hidden");
+    $(".cmds-toggle", el).setAttribute("aria-expanded", String(!cmds.classList.contains("hidden")));
+  });
+  $(".cmds", el).addEventListener("click", (ev) => {
+    const row = ev.target.closest(".cmd-row");
+    if (!row || !row._cmd) return;
+    copy(row._cmd);
+    const btn = row.querySelector(".cmd-copy");
+    if (btn) {
+      const o = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = o; }, 1200);
+    }
+  });
   const manual = $(".manual-code", el);
   manual.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") doRefresh(el);
@@ -104,6 +120,8 @@ function updateCard(el, acc) {
   const device = arn.includes("/") ? arn.slice(arn.indexOf("/") + 1) : arn;
   $(".mfa-device", el).textContent = device || "(no ARN set)";
   $(".mfa-arn", el).textContent = arn;
+
+  renderCommands(el, acc);
 
   const totpArea = $(".totp-area", el);
   const manualArea = $(".manual-area", el);
@@ -295,6 +313,56 @@ async function doSetDefault(el) {
   } finally {
     btn.disabled = false;
     btn.textContent = orig;
+  }
+}
+
+/* Build the copy-paste command list for a card. Rows are built with textContent so a
+   profile name or ARN can never inject markup. */
+function renderCommands(el, acc) {
+  const cmds = $(".cmds", el);
+  if (!cmds) return;
+  const T = acc.target_profile;
+  const S = acc.source_profile;
+  const arn = acc.mfa_serial;
+  const dur = acc.duration_seconds;
+
+  const items = [
+    ["Verify identity / check the creds", `aws sts get-caller-identity --profile ${T}`],
+    ["List S3 buckets", `aws s3 ls --profile ${T}`],
+    ["Show what's configured", `aws configure list --profile ${T}`],
+    ["Use this profile for the whole shell", `export AWS_PROFILE=${T}`],
+    ["Manually refresh the MFA session (replace CODE)",
+      `aws sts get-session-token --serial-number ${arn} --duration-seconds ${dur} --profile ${S} --token-code CODE`],
+  ];
+
+  cmds.textContent = "";
+  for (const [label, cmd] of items) {
+    const item = document.createElement("div");
+    item.className = "cmd-item";
+
+    const lab = document.createElement("span");
+    lab.className = "cmd-label";
+    lab.textContent = label;
+
+    const row = document.createElement("div");
+    row.className = "cmd-row";
+    row.title = "Click to copy";
+    row._cmd = cmd;
+
+    const code = document.createElement("code");
+    code.className = "cmd-text";
+    code.textContent = cmd;
+
+    const btn = document.createElement("button");
+    btn.className = "cmd-copy";
+    btn.type = "button";
+    btn.textContent = "Copy";
+
+    row.appendChild(code);
+    row.appendChild(btn);
+    item.appendChild(lab);
+    item.appendChild(row);
+    cmds.appendChild(item);
   }
 }
 
