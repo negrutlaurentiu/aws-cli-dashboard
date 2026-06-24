@@ -26,6 +26,11 @@ macOS. GitHub: `git@github.com:negrutlaurentiu/aws-cli-dashboard.git`.
 
 ### The @Claude intake listener (`bin/mm-listen`)
 
+> **Maintainer deep-dive:** [`docs/mattermost-intake.md`](docs/mattermost-intake.md) — data flow,
+> config keys, lifecycle, "how to change X" recipes, and troubleshooting. Read it before editing the
+> intake pipeline.
+
+
 Mattermost's native triggers (outgoing webhooks / slash commands) POST a callback **to** the
 integration, which can't work here — the dashboard binds `127.0.0.1` only and the Mattermost server
 is remote. Instead `bin/mm-listen` opens an **outbound** WebSocket to Mattermost (RFC 6455 by hand,
