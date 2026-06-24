@@ -106,6 +106,11 @@ try {
             s3DownloadStatus($app);
             break;
 
+        case $method === 'POST' && $path === '/api/profiles/delete':
+            $app->assertCsrf();
+            deleteProfile($app);
+            break;
+
         case $method === 'GET' && $path === '/tasks':
             renderTasks($app);
             break;
@@ -119,13 +124,18 @@ try {
             $app->json(['ok' => true, 'summary' => $app->tasks->weekSummary(time() + $off * 7 * 86400)]);
             break;
 
+        case $method === 'GET' && $path === '/api/screentime':
+            $app->json(['ok' => true, 'screentime' => (new ScreenTime(App::homeDir()))->today()]);
+            break;
+
         case $method === 'POST' && $path === '/api/tasks':
             $app->assertCsrf();
             $tb = $app->jsonBody();
             $app->json(['ok' => true, 'task' => $app->tasks->create(
                 (string) ($tb['title'] ?? ''),
                 (string) ($tb['description'] ?? ''),
-                (string) ($tb['status'] ?? 'pending')
+                (string) ($tb['status'] ?? 'pending'),
+                (string) ($tb['project'] ?? '')
             )]);
             break;
 
@@ -138,6 +148,20 @@ try {
             }
             unset($tb['id']);
             $app->json(['ok' => true, 'task' => $app->tasks->update($tid, $tb)]);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks/move':
+            $app->assertCsrf();
+            $tb = $app->jsonBody();
+            $tid = trim((string) ($tb['id'] ?? ''));
+            if ($tid === '') {
+                $app->fail(400, 'Missing task id.');
+            }
+            $app->json(['ok' => true, 'task' => $app->tasks->move(
+                $tid,
+                (string) ($tb['status'] ?? ''),
+                trim((string) ($tb['before_id'] ?? ''))
+            )]);
             break;
 
         case $method === 'POST' && $path === '/api/tasks/delete':
@@ -163,6 +187,19 @@ try {
             $app->json(['ok' => true, 'task' => $task]);
             break;
 
+        case $method === 'POST' && $path === '/api/tasks/worked':
+            $app->assertCsrf();
+            $tb = $app->jsonBody();
+            $tid = trim((string) ($tb['id'] ?? ''));
+            if ($tid === '') {
+                $app->fail(400, 'Missing task id.');
+            }
+            $secs = (int) ($tb['seconds'] ?? 0);
+            // Worked time is always logged against a specific local day (YYYY-MM-DD).
+            $task = $app->tasks->setWorkedForDay($tid, (string) ($tb['date'] ?? ''), $secs);
+            $app->json(['ok' => true, 'task' => $task]);
+            break;
+
         case $method === 'POST' && $path === '/api/tasks/upload':
             $app->assertCsrf();
             taskUpload($app);
@@ -171,6 +208,27 @@ try {
         case $method === 'GET' && $path === '/api/tasks/file':
             $app->assertCsrfQuery();
             taskFile($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks/note':
+            $app->assertCsrf();
+            $tb = $app->jsonBody();
+            $tid = trim((string) ($tb['id'] ?? ''));
+            if ($tid === '') {
+                $app->fail(400, 'Missing task id.');
+            }
+            $app->json(['ok' => true, 'task' => $app->tasks->addNote($tid, (string) ($tb['text'] ?? ''))]);
+            break;
+
+        case $method === 'POST' && $path === '/api/tasks/note-delete':
+            $app->assertCsrf();
+            $tb = $app->jsonBody();
+            $tid = trim((string) ($tb['task_id'] ?? ''));
+            $nid = trim((string) ($tb['note_id'] ?? ''));
+            if ($tid === '' || $nid === '') {
+                $app->fail(400, 'Missing ids.');
+            }
+            $app->json(['ok' => true, 'task' => $app->tasks->deleteNote($tid, $nid)]);
             break;
 
         case $method === 'POST' && $path === '/api/tasks/file-delete':
@@ -183,6 +241,46 @@ try {
             }
             $app->tasks->removeAttachment($tid, $fid);
             $app->json(['ok' => true]);
+            break;
+
+        case $method === 'GET' && $path === '/api/mattermost/settings':
+            $app->json(['ok' => true, 'settings' => mattermostSettingsView($app)]);
+            break;
+
+        case $method === 'POST' && $path === '/api/mattermost/settings':
+            $app->assertCsrf();
+            $app->store->saveMattermost($app->jsonBody());
+            $app->json(['ok' => true, 'settings' => mattermostSettingsView($app)]);
+            break;
+
+        case $method === 'POST' && $path === '/api/mattermost/test':
+            $app->assertCsrf();
+            mattermostTest($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/mattermost/checkin':
+            $app->assertCsrf();
+            mattermostPost($app, 'checkin');
+            break;
+
+        case $method === 'POST' && $path === '/api/mattermost/checkout':
+            $app->assertCsrf();
+            mattermostPost($app, 'checkout');
+            break;
+
+        // @Claude intake listener (bin/mm-listen) — health + manual (re)start/stop.
+        case $method === 'GET' && $path === '/api/mattermost/listener':
+            $app->json(['ok' => true, 'listener' => mattermostListenerView($app)]);
+            break;
+
+        case $method === 'POST' && $path === '/api/mattermost/listener/start':
+            $app->assertCsrf();
+            mattermostListenerStart($app);
+            break;
+
+        case $method === 'POST' && $path === '/api/mattermost/listener/stop':
+            $app->assertCsrf();
+            mattermostListenerStop($app);
             break;
 
         default:
@@ -416,10 +514,22 @@ function renderTemplate(App $app, string $file, string $csp): never
         echo 'Template missing.';
         exit;
     }
+    // Cache-buster for the static JS/CSS: the newest mtime across our assets. The page HTML is
+    // no-store (below), so every reload re-reads this and a changed file gets a fresh `?v=` URL —
+    // no-build means there's nothing else to stop a long-lived tab from running stale JS, and PHP's
+    // built-in server serves these assets without any cache validators.
+    $assetVer = 0;
+    foreach (array_merge([__DIR__ . '/styles.css'], glob(__DIR__ . '/*.js') ?: []) as $asset) {
+        $m = @filemtime($asset);
+        if ($m !== false && $m > $assetVer) {
+            $assetVer = $m;
+        }
+    }
     $html = strtr($template, [
         '__APP_TOKEN__' => htmlspecialchars($app->store->appToken(), ENT_QUOTES),
         '__HOST__' => App::HOST,
         '__PORT__' => (string) App::PORT,
+        '__ASSET_VER__' => (string) $assetVer,
     ]);
     header('Content-Type: text/html; charset=utf-8');
     header('Cache-Control: no-store');
@@ -532,6 +642,51 @@ function s3DownloadStatus(App $app): void
     $app->json(['ok' => true] + (new S3($app->awsBin))->downloadStatus($job));
 }
 
+/**
+ * Delete an AWS profile from ~/.aws/credentials (and ~/.aws/config). The client-supplied name is
+ * only ever matched as a section name (string equality), never used to build a path — so there is
+ * no traversal. Each file is backed up to .bak before its atomic rewrite (CredentialsFile::save),
+ * and the read-modify-write runs under the credentials lock so a concurrent refresh can't clobber it.
+ */
+function deleteProfile(App $app): void
+{
+    $name = trim((string) ($app->jsonBody()['profile'] ?? ''));
+    if ($name === '') {
+        $app->fail(400, 'Missing profile name.');
+    }
+    if ($name === 'default') {
+        $app->fail(400, 'The [default] profile cannot be deleted here.');
+    }
+
+    $removed = $app->withCredentialsLock(function () use ($app, $name): array {
+        $out = [];
+        if (is_file($app->credentialsPath)) {
+            $cred = new CredentialsFile($app->credentialsPath);
+            $n = $cred->removeProfile($name);
+            if ($n > 0) {
+                $cred->save();
+                $out['credentials'] = $n;
+            }
+        }
+        // The config file names profiles [profile <name>] — match only that form (never a bare
+        // [name], which in config is a non-profile section), whitespace-tolerant.
+        if (is_file($app->awsConfigPath)) {
+            $cfg = new CredentialsFile($app->awsConfigPath);
+            $n = $cfg->removeConfigProfile($name);
+            if ($n > 0) {
+                $cfg->save();
+                $out['config'] = $n;
+            }
+        }
+        return $out;
+    });
+
+    if (empty($removed)) {
+        $app->fail(404, "Profile '{$name}' was not found in the credentials or config file.");
+    }
+    $app->json(['ok' => true, 'profile' => $name, 'removed' => $removed]);
+}
+
 /** @return array{0:string,1:bool} [mime, inline-safe] */
 function s3Mime(string $key): array
 {
@@ -635,4 +790,333 @@ function serveLocalFile(string $path, string $displayName, bool $dl): void
         flush();
     }
     fclose($fh);
+}
+
+// ---- Mattermost integration ------------------------------------------------
+
+/** Secret-free view of the Mattermost config for the browser (never leaks the token). */
+function mattermostSettingsView(App $app): array
+{
+    $m = $app->store->mattermost();
+    return [
+        'base_url' => $m['base_url'],
+        'team' => $m['team'],
+        'checkin_channel' => $m['checkin_channel'],
+        'checkout_channel' => $m['checkout_channel'],
+        'has_token' => $m['token'] !== '',
+        'channels_resolved' => $m['checkin_channel_id'] !== '' && $m['checkout_channel_id'] !== '',
+        'configured' => $m['base_url'] !== '' && $m['token'] !== '',
+        'checkout_show_hours' => $m['checkout_show_hours'],
+        // @Claude intake config (never the token; the listener reads that server-side).
+        'intake_enabled' => $m['intake_enabled'],
+        'intake_tag' => $m['intake_tag'],
+        'intake_project' => $m['intake_project'],
+        'intake_channel' => $m['intake_channel'],
+        // Optional Claude interpretation via the local `claude` CLI (no API key). Report whether the
+        // CLI is found, so the UI can warn if it isn't.
+        'intake_llm' => $m['intake_llm'],
+        'claude_available' => (new ClaudeCli())->isAvailable(),
+        'claude_bin' => (new ClaudeCli())->bin(),
+    ];
+}
+
+/**
+ * Health of the @Claude intake listener for the status dot. Returns the heartbeat state and whether
+ * intake is enabled/configured — no token, no message content ever leaves here.
+ *
+ * @return array<string,mixed>
+ */
+function mattermostListenerView(App $app): array
+{
+    $st = $app->store->listenerStatus();
+    $m = $app->store->mattermost();
+    return [
+        'running' => $st['running'],
+        'state' => $st['state'], // connecting|connected|disabled|error|stale|stopped
+        'age' => $st['age'],
+        'error' => $st['error'],
+        'intake_enabled' => $m['intake_enabled'],
+        'intake_tag' => $m['intake_tag'],
+        'configured' => $m['base_url'] !== '' && $m['token'] !== '',
+    ];
+}
+
+/**
+ * (Re)start the listener if it isn't already heartbeating. The daemon is a flock singleton, so a
+ * duplicate launch is harmless. Spawns a fixed binary with fixed redirects — no client input ever
+ * reaches the shell.
+ */
+function mattermostListenerStart(App $app): void
+{
+    $st = $app->store->listenerStatus();
+    if ($st['running']) {
+        $app->json(['ok' => true, 'already' => true, 'state' => $st['state']]);
+    }
+    $bin = $app->projectDir . '/bin/mm-listen';
+    if (!is_file($bin)) {
+        $app->fail(500, 'Listener binary not found.');
+    }
+    $log = $app->configDir . '/mm-listen.log';
+    $cmd = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($bin)
+         . ' >> ' . escapeshellarg($log) . ' 2>&1 &';
+    exec($cmd);
+    $app->json(['ok' => true, 'started' => true]);
+}
+
+/** Stop the listener (best-effort, by the pid it recorded). The pid is cast to int — never shelled raw. */
+function mattermostListenerStop(App $app): void
+{
+    $pid = (int) @file_get_contents($app->configDir . '/mm-listen.pid');
+    if ($pid > 1) {
+        if (function_exists('posix_kill')) {
+            @posix_kill($pid, 15); // SIGTERM → clean shutdown
+        } else {
+            exec('kill ' . $pid . ' 2>/dev/null');
+        }
+    }
+    $app->json(['ok' => true, 'stopped' => true]);
+}
+
+/** Validate the token (GET /users/me) and resolve + cache both channel ids. */
+function mattermostTest(App $app): void
+{
+    $m = $app->store->mattermost();
+    $mm = new Mattermost($m);
+    if (!$mm->isConfigured()) {
+        $app->fail(400, 'Set the server URL and access token, save, then test.');
+    }
+    $me = $mm->me();
+    $checkinId = $mm->resolveChannelId($m['team'], $m['checkin_channel']);
+    $checkoutId = $mm->resolveChannelId($m['team'], $m['checkout_channel']);
+    $app->store->saveMattermostChannelIds($checkinId, $checkoutId);
+    $app->json([
+        'ok' => true,
+        'username' => (string) ($me['username'] ?? '(unknown)'),
+        'checkin_channel_id' => $checkinId,
+        'checkout_channel_id' => $checkoutId,
+    ]);
+}
+
+/**
+ * Build the digest for $which ('checkin'|'checkout'). With {"preview":true} returns the composed
+ * message WITHOUT posting (so the operator reviews it first — the manual-trigger model they chose);
+ * otherwise posts it to the mapped channel and returns the post id.
+ */
+function mattermostPost(App $app, string $which): void
+{
+    $m = $app->store->mattermost();
+    $channelName = $which === 'checkin' ? $m['checkin_channel'] : $m['checkout_channel'];
+    $body = $app->jsonBody();
+
+    // Per-checkout "include worked hours" override. The client may flip the toggle in the preview
+    // (`include_hours`); absent that, fall back to the operator's saved default. (Check-in has no
+    // hours, so this only affects check-out.)
+    $includeHours = array_key_exists('include_hours', $body)
+        ? (bool) $body['include_hours']
+        : $m['checkout_show_hours'];
+
+    // Preview: return the freshly-composed digest WITHOUT posting, so the operator reviews (and
+    // can edit) it first. This is the only path that runs for a preview request.
+    if (!empty($body['preview'])) {
+        $app->json([
+            'ok' => true,
+            'preview' => true,
+            'channel' => $channelName,
+            'message' => $which === 'checkin' ? buildCheckinMessage($app) : buildCheckoutMessage($app, $includeHours),
+            'include_hours' => $which === 'checkout' ? $includeHours : null,
+            'configured' => (new Mattermost($m))->isConfigured(),
+        ]);
+    }
+
+    // Send: post the operator-reviewed message from the client if present (they may have edited
+    // it in the preview), otherwise (re)build it. The operator is trusted, so their text is sent
+    // as-is — only length is bounded (Mattermost rejects oversized posts anyway).
+    $message = isset($body['message']) && is_string($body['message']) && trim($body['message']) !== ''
+        ? trim($body['message'])
+        : ($which === 'checkin' ? buildCheckinMessage($app) : buildCheckoutMessage($app, $includeHours));
+    if ($message === '') {
+        $app->fail(400, 'Nothing to post.');
+    }
+    if (mb_strlen($message) > 16383) {
+        $app->fail(400, 'Message is too long to post (16,383 character limit).');
+    }
+
+    $mm = new Mattermost($m);
+    if (!$mm->isConfigured()) {
+        $app->fail(400, 'Mattermost is not configured — open settings and add your token.');
+    }
+    $cachedId = $which === 'checkin' ? $m['checkin_channel_id'] : $m['checkout_channel_id'];
+    $channelId = $cachedId;
+    if ($channelId === '') {
+        // Resolve on demand and cache it, so subsequent posts skip the extra lookup.
+        $channelId = $mm->resolveChannelId($m['team'], $channelName);
+        if ($which === 'checkin') {
+            $app->store->saveMattermostChannelIds($channelId, $m['checkout_channel_id']);
+        } else {
+            $app->store->saveMattermostChannelIds($m['checkin_channel_id'], $channelId);
+        }
+    }
+    $postId = $mm->post($channelId, $message);
+    $app->json(['ok' => true, 'posted' => true, 'channel' => $channelName, 'post_id' => $postId]);
+}
+
+/** Check-in digest: In Progress and Pending as two separate sections (the operator's choice). */
+function buildCheckinMessage(App $app): string
+{
+    $tasks = $app->tasks->all();
+    $inProgress = array_values(array_filter($tasks, static fn ($t) => ($t['status'] ?? '') === 'in_progress'));
+    $pending = array_values(array_filter($tasks, static fn ($t) => ($t['status'] ?? '') === 'pending'));
+
+    // Check-in is just what's on my plate — no worked-time here (times live on the check-out).
+    $lines = ['**:inbox_tray: Check-in — ' . date('D, M j') . '**', ''];
+    $lines[] = '**In Progress**';
+    foreach (mmTaskLines($inProgress) as $l) {
+        $lines[] = $l;
+    }
+    $lines[] = '';
+    $lines[] = '**Pending**';
+    foreach (mmTaskLines($pending) as $l) {
+        $lines[] = $l;
+    }
+    return implode("\n", $lines);
+}
+
+/**
+ * Check-out digest: a "Done today" section (tasks moved to Done since local midnight) and a "Still
+ * in progress" section (whatever's currently in_progress). Both are grouped by project and carry
+ * each task's TODAY worked-time; a single "Total worked today" sums the hours across both sections.
+ * When $includeHours is false, every per-task time tag and the total are omitted (the operator's
+ * per-checkout toggle). macOS computer-active time is intentionally not posted here.
+ */
+function buildCheckoutMessage(App $app, bool $includeHours): string
+{
+    $since = strtotime('today'); // local midnight today
+    $done = $app->tasks->completedSince($since !== false ? $since : (time() - 86400));
+    $inProgress = array_values(array_filter(
+        $app->tasks->all(),
+        static fn ($t) => ($t['status'] ?? '') === 'in_progress'
+    ));
+
+    $lines = ['**:white_check_mark: Check-out — ' . date('D, M j') . '**', ''];
+    $grandTotal = 0;
+
+    // ---- Done today ---- (completedSince() carries each task's TODAY hours as 'worked_seconds')
+    $lines[] = '**Done today**';
+    if (!$done) {
+        $lines[] = '_No tasks completed today._';
+    } else {
+        [$sectionLines, $sectionTotal] = mmCheckoutSection($done, 'worked_seconds', $includeHours);
+        array_push($lines, ...$sectionLines);
+        $grandTotal += $sectionTotal;
+    }
+
+    // ---- Still in progress ---- (serialize() exposes each task's TODAY hours as 'today_seconds')
+    $lines[] = '';
+    $lines[] = '**Still in progress**';
+    if (!$inProgress) {
+        $lines[] = '_Nothing in progress._';
+    } else {
+        [$sectionLines, $sectionTotal] = mmCheckoutSection($inProgress, 'today_seconds', $includeHours);
+        array_push($lines, ...$sectionLines);
+        $grandTotal += $sectionTotal;
+    }
+
+    // ---- Grand total across everything worked today (done + in-progress) ----
+    if ($includeHours) {
+        $lines[] = '';
+        $lines[] = '**Total worked today: ' . fmtDur($grandTotal) . '**';
+    }
+
+    return implode("\n", $lines);
+}
+
+/**
+ * Render one check-out section: tasks grouped by project (a `**Project**` sub-header per group;
+ * no-project tasks fall under "Other", sorted last), each a bullet that carries its TODAY worked
+ * time (from $secondsKey) when $includeHours is on and the task logged time today. Returns the
+ * rendered lines (no leading/trailing blank) and the summed seconds, so the caller can fold each
+ * section's total into one grand total.
+ *
+ * @param array<int,array<string,mixed>> $tasks
+ * @return array{0:array<int,string>,1:int} [lines, total seconds]
+ */
+function mmCheckoutSection(array $tasks, string $secondsKey, bool $includeHours): array
+{
+    $groups = [];
+    foreach ($tasks as $t) {
+        $proj = trim((string) ($t['project'] ?? ''));
+        $groups[$proj !== '' ? $proj : 'Other'][] = $t;
+    }
+    uksort($groups, static function (string $a, string $b): int {
+        if ($a === 'Other') {
+            return 1;
+        }
+        if ($b === 'Other') {
+            return -1;
+        }
+        return strcasecmp($a, $b);
+    });
+
+    $lines = [];
+    $total = 0;
+    foreach ($groups as $proj => $items) {
+        $lines[] = '**' . mmText($proj) . '**';
+        foreach ($items as $t) {
+            $secs = (int) ($t[$secondsKey] ?? 0);
+            $total += $secs;
+            $line = '- ' . mmText((string) ($t['title'] ?? ''));
+            if ($includeHours && $secs > 0) {
+                $line .= ' _(:hourglass_flowing_sand: ' . fmtDur($secs) . ')_';
+            }
+            $lines[] = $line;
+        }
+        $lines[] = ''; // blank between project groups
+    }
+    array_pop($lines); // drop the trailing blank — the caller owns spacing between sections
+
+    return [$lines, $total];
+}
+
+/**
+ * @param array<int,array<string,mixed>> $tasks
+ * @return array<int,string>
+ */
+function mmTaskLines(array $tasks): array
+{
+    if (!$tasks) {
+        return ['_none_'];
+    }
+    $out = [];
+    foreach ($tasks as $t) {
+        $proj = trim((string) ($t['project'] ?? ''));
+        $prefix = $proj !== '' ? '`' . mmText($proj) . '` ' : '';
+        $out[] = '- ' . $prefix . mmText((string) ($t['title'] ?? ''));
+    }
+    return $out;
+}
+
+/**
+ * Neutralize a task title for a Markdown channel message: collapse newlines/whitespace to a
+ * single line, and defuse channel-wide mentions (@channel/@here/@all) with a zero-width space so
+ * a title can never mass-ping the channel. (Titles are operator-entered, so this is belt-and-braces.)
+ */
+function mmText(string $s): string
+{
+    $s = preg_replace('/\s+/u', ' ', trim($s)) ?? '';
+    $zwsp = "\xE2\x80\x8B"; // U+200B — invisible, but breaks the @mention token
+    return preg_replace('/@(channel|here|all)\b/i', '@' . $zwsp . '$1', $s) ?? $s;
+}
+
+function fmtDur(int $s): string
+{
+    $s = max(0, $s);
+    $h = intdiv($s, 3600);
+    $m = intdiv($s % 3600, 60);
+    if ($h > 0) {
+        return $h . 'h ' . $m . 'm';
+    }
+    if ($m > 0) {
+        return $m . 'm';
+    }
+    return $s . 's';
 }

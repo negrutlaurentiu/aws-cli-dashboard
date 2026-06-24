@@ -6,7 +6,7 @@
   <meta name="csrf-token" content="__APP_TOKEN__">
   <title>S3 Browser · AWS CLI Dashboard</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%97%84%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=__ASSET_VER__">
 </head>
 <body>
   <div class="aurora" aria-hidden="true"></div>
@@ -25,8 +25,8 @@
       <a href="/tasks" class="nav-link">Tasks</a>
     </nav>
     <div class="topbar-actions">
-      <label class="sel-wrap"><span>Account</span>
-        <select id="account-select" aria-label="Account"></select></label>
+      <label class="sel-wrap"><span>Profile</span>
+        <select id="account-select" aria-label="Profile"></select></label>
     </div>
   </header>
 
@@ -81,6 +81,6 @@
     </div>
   </template>
 
-  <script src="/s3.js" defer></script>
+  <script src="/s3.js?v=__ASSET_VER__" defer></script>
 </body>
 </html>

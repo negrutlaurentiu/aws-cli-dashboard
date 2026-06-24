@@ -17,10 +17,33 @@ A **single-user, localhost developer dashboard** (PHP, no framework, no dependen
    `~/Downloads/aws-cli-dashboard` (detached job + progress).
 3. **Tasks** (`/tasks`) — Kanban board (pending / in_progress / review / done / archived) with
    drag-and-drop, per-task work timer, time-in-status tracking, file attachments with preview,
-   and a weekly work summary.
+   a weekly work summary, Mattermost check-in/out posting, and **@Claude intake**: a background
+   listener (`bin/mm-listen`) holds a Mattermost WebSocket open and turns the operator's own
+   `@Claude …` messages into tasks (see below).
 
 It shells out to the real `aws` CLI for everything AWS. Runtime: **PHP 8.5**, **aws-cli v2**,
 macOS. GitHub: `git@github.com:negrutlaurentiu/aws-cli-dashboard.git`.
+
+### The @Claude intake listener (`bin/mm-listen`)
+
+Mattermost's native triggers (outgoing webhooks / slash commands) POST a callback **to** the
+integration, which can't work here — the dashboard binds `127.0.0.1` only and the Mattermost server
+is remote. Instead `bin/mm-listen` opens an **outbound** WebSocket to Mattermost (RFC 6455 by hand,
+via `MattermostSocket`), authenticates with the stored bearer token, and reads `posted` events. For
+the operator's **own** non-system messages that start with the trigger tag (default `@Claude`,
+optionally restricted to one channel), it turns the text into a task and calls `Tasks::create()`
+directly, then reacts ✅ on the source post. Parsing is either the **built-in heuristic** (`Intake`:
+`proj:`/`#`/`!status` tokens) or, when `intake_llm` is on, an **optional Claude pass**
+(`ClaudeCli::extractTask`, which shells out to the operator's local `claude` CLI — no API key) that
+interprets the free-form text — plus the replied-to message fetched via `Mattermost::getPost` — into
+a structured task; the LLM path degrades to the heuristic if the CLI is missing/slow/errors, so
+intake never wedges. It's a `flock`
+**singleton**, idles when `intake_enabled`
+is off (re-checking every ~15s), reconnects with backoff, and writes a `mm-listen.status` heartbeat
+the UI polls for a toolbar status dot. `start.sh` launches it in the background and a `trap` kills it
+on exit, so it and the dashboard live and die together (it is NOT a daemon that survives the
+terminal). WebSocket delivers each post once and never replays history on reconnect, so there is no
+backfill and no dedup bookkeeping.
 
 ## Run / test it
 
@@ -73,9 +96,13 @@ How changes have been verified (do the same):
 | `Totp.php` | RFC 6238 TOTP (base32 + HMAC-SHA1). Passes the standard test vectors. |
 | `CredentialsFile.php` | Line-preserving editor for `~/.aws/credentials`: load / setProfile (last-wins on dup names) / getProfile / removeKey / render / atomic save with backup. |
 | `Sts.php` | Wraps `aws sts get-session-token` and `get-caller-identity` (proc_open + escapeshellarg); `listProfiles`. |
-| `Store.php` | `accounts.json`, `state.json` (CSRF app token + last-session info), `settings.json` (global token lifetime). |
+| `Store.php` | `accounts.json`, `state.json` (CSRF app token + last-session info), `settings.json` (global token lifetime), `mattermost.json` (connection + `intake_*` config), and the listener heartbeat (`mm-listen.status`). |
 | `S3.php` | `aws s3 / s3api`: listBuckets, listObjects (paginated), headObject, streamObject, detached recursive download + status. Path-confinement helpers. |
 | `Tasks.php` | Task store: CRUD, timer/sessions, status history, weekly summary, attachments; `flock` + atomic writes. |
+| `Mattermost.php` | Mattermost REST v4 client (bearer token, HTTPS + TLS-verify, no redirects): `me`, `resolveChannelId`, `post`, `addReaction`. Posts check-in/out digests; the only outbound-HTTP surface. |
+| `MattermostSocket.php` | Hand-rolled RFC 6455 WebSocket **client** (stock PHP, no deps): TLS connect, `authentication_challenge`, masked client frames, ping/pong, frame parser. Powers the @Claude listener. |
+| `Intake.php` | Pure logic for the @Claude listener: `matchPostedEvent` (own/non-system/tag filter), the built-in `parse` (`proj:`/`#`/`!status` heuristic), and title/description sanitisation. No I/O — unit-testable. |
+| `ClaudeCli.php` | Optional task interpretation via the operator's LOCAL `claude` CLI (Claude Code — the subscription they're logged into, NO API key): `extractTask()` runs `claude -p … --output-format json` (proc_open, argv array — no shell) in a neutral cwd with a timeout, and reads `{title,project,description,status}` out of the result. The listener falls back to `Intake::parse` if it's missing/slow/errors. |
 
 ## Routing / how to add things
 
@@ -119,6 +146,23 @@ operator, or that corrupts the credentials file / leaks a secret.
   `t-`/`f-` id; S3 download dest is confined under `~/Downloads/...` via `safeSegment`/`safeRelPath`.
 - **No secret to the browser**: the API returns `has_secret: true/false`, never the TOTP seed or
   written keys (access keys are masked via `maskKey`).
+- **@Claude listener**: the bearer token is read server-side only and rides the **TLS-verified**
+  socket (`verify_peer`/`verify_peer_name` always on) / `Authorization` header to the validated host
+  — never logged, never in the `mm-listen.status` heartbeat (state + timestamp only), never returned
+  by `/api/mattermost/listener`. **Only the operator's own posts** (`user_id === me.id`) trigger
+  intake, so a coworker can't create tasks. Inbound chat is untrusted: the task **title is sanitised**
+  (control chars stripped, length capped) before `Tasks::create`. The cursor-free WebSocket model
+  plus the `flock` singleton mean overlapping reads can't double-create. The `start`/`stop` routes
+  are `assertCsrf`-guarded and only ever spawn a **fixed binary** / `kill` an int pid — no client
+  input reaches the shell.
+- **Local `claude` CLI (optional LLM intake)**: there is NO API key — `ClaudeCli` shells out to the
+  operator's logged-in `claude` binary via `proc_open` with an **argv array** (the untrusted message
+  text is a single argument, never interpolated into a shell command — no injection surface), in a
+  neutral cwd (so it doesn't load this project's CLAUDE.md/MCP), with a hard timeout. The binary path
+  is fixed/resolved (`CLAUDE_CLI_BIN` env → known locations → PATH), never client input. Worst case
+  of a prompt-injected referenced message is a mis-parsed task on the operator's OWN board — no
+  escalation (model output is never eval'd/shelled/used as a path), and any failure falls back to the
+  heuristic.
 
 ## Data & files (all gitignored — NEVER commit real data)
 
@@ -128,6 +172,8 @@ operator, or that corrupts the credentials file / leaks a secret.
 | `config/state.json` | CSRF app token + last-session info | 0600 |
 | `config/settings.json` | global token lifetime | 0600 |
 | `config/tasks.json` | tasks | 0600, `flock` via `.lock` |
+| `config/mattermost.json` | Mattermost URL/token/channels + `intake_*` config | 0600. Example: `mattermost.example.json` (redacted token only). |
+| `config/mm-listen.{lock,pid,status,log}` | @Claude listener runtime (singleton lock, pid, heartbeat, log) | 0600; transient, recreated on launch. No secrets. |
 | `data/task-files/<taskId>/<fileId>` | attachment blobs | 0700/0600, outside the doc root |
 | `~/.aws/credentials` | the real AWS creds we read/write | backed up to `.bak` before writes |
 

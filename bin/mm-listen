@@ -1,0 +1,257 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+namespace AwsDash;
+
+/**
+ * @Claude task intake listener — a long-lived companion to the dashboard.
+ *
+ * Holds ONE authenticated Mattermost WebSocket open (opened OUTBOUND from this machine, so the
+ * localhost-only dashboard never needs to be reachable from the server), watches the operator's own
+ * messages, and turns those that start with the configured trigger tag (default "@Claude") into
+ * tasks — then reacts ✅ on the source message as a quiet acknowledgement.
+ *
+ * Lifecycle: start.sh launches this in the background and kills it on exit (they live and die
+ * together); it can also be (re)started from /tasks. It is a flock SINGLETON, so a second launch is
+ * harmless. When intake is disabled in settings (or not configured) it simply idles and re-checks,
+ * so toggling the setting takes effect within ~15s without a restart.
+ *
+ * Security: the token is read from config/mattermost.json (0600), sent only over the TLS-verified
+ * socket / Authorization header to the operator-validated host, and is NEVER logged. Only the
+ * operator's own posts trigger intake (so a coworker can't create tasks on the board). The heartbeat
+ * file carries state + timestamp only — no token, no message text.
+ */
+
+require __DIR__ . '/../src/bootstrap.php';
+
+$app = new App();
+
+// ---- singleton guard (flock) ----------------------------------------------
+$lockPath = $app->configDir . '/mm-listen.lock';
+$pidPath = $app->configDir . '/mm-listen.pid';
+$lockFh = @fopen($lockPath, 'c');
+if ($lockFh === false || !flock($lockFh, LOCK_EX | LOCK_NB)) {
+    fwrite(STDERR, mmTs() . " another mm-listen is already running — exiting\n");
+    exit(0);
+}
+@chmod($lockPath, 0600);
+@file_put_contents($pidPath, (string) getmypid());
+@chmod($pidPath, 0600);
+
+// ---- graceful shutdown -----------------------------------------------------
+$RUN = true;
+if (function_exists('pcntl_async_signals')) {
+    pcntl_async_signals(true);
+    $stop = static function () use (&$RUN): void { $RUN = false; };
+    pcntl_signal(SIGTERM, $stop);
+    pcntl_signal(SIGINT, $stop);
+}
+
+fwrite(STDERR, mmTs() . " mm-listen started (pid " . getmypid() . ")\n");
+
+$backoff = 1;
+while ($RUN) {
+    $cfg = $app->store->mattermost();
+
+    // Idle while disabled / unconfigured; re-check every 15s so enabling it in the UI just works.
+    if (!$cfg['intake_enabled'] || $cfg['base_url'] === '' || $cfg['token'] === '') {
+        $app->store->writeListenerStatus('disabled');
+        mmIdle(15, $RUN);
+        continue;
+    }
+
+    $sock = null;
+    try {
+        $app->store->writeListenerStatus('connecting');
+        $mm = new Mattermost($cfg);
+        $me = $mm->me();
+        $myUserId = (string) ($me['id'] ?? '');
+        if ($myUserId === '') {
+            throw new \RuntimeException('Could not resolve the token owner (GET /users/me).');
+        }
+
+        $sock = new MattermostSocket($cfg['base_url'], $cfg['token'], 10);
+        $sock->connect();
+        $sock->authenticate();
+        $backoff = 1;
+        $app->store->writeListenerStatus('connected');
+        fwrite(STDERR, mmTs() . " connected (watching tag " . $cfg['intake_tag']
+            . ($cfg['intake_channel'] !== '' ? ' in #' . $cfg['intake_channel'] : ' in all channels') . ")\n");
+
+        $lastBeat = time();
+        $lastPing = time();
+        while ($RUN) {
+            $evt = $sock->read(); // null on idle read-timeout (~10s)
+            if ($evt !== null) {
+                try {
+                    if (mmHandleEvent($app, $mm, $evt, $myUserId, $cfg)) {
+                        fwrite(STDERR, mmTs() . " created a task from a @Claude message\n");
+                    }
+                } catch (\Throwable $e) {
+                    fwrite(STDERR, mmTs() . " event error: " . $e->getMessage() . "\n");
+                }
+            }
+
+            $now = time();
+            if ($now - $lastBeat >= 10) {
+                // Re-read config: react to disable / token / server changes, live-update filters.
+                $fresh = $app->store->mattermost();
+                if (!$fresh['intake_enabled'] || $fresh['token'] !== $cfg['token'] || $fresh['base_url'] !== $cfg['base_url']) {
+                    break; // supervisor idles or reconnects with the new config
+                }
+                $cfg['intake_tag'] = $fresh['intake_tag'];
+                $cfg['intake_channel'] = $fresh['intake_channel'];
+                $cfg['intake_project'] = $fresh['intake_project'];
+                $cfg['intake_llm'] = $fresh['intake_llm'];
+                $app->store->writeListenerStatus('connected');
+                $lastBeat = $now;
+            }
+            if ($now - $lastPing >= 30) {
+                $sock->ping(); // keepalive; the pong wakes the read loop
+                $lastPing = $now;
+            }
+        }
+    } catch (\Throwable $e) {
+        $app->store->writeListenerStatus('error', $e->getMessage());
+        fwrite(STDERR, mmTs() . " connection error: " . $e->getMessage() . " (retry in {$backoff}s)\n");
+        if ($sock instanceof MattermostSocket) {
+            $sock->close();
+            $sock = null;
+        }
+        mmIdle($backoff, $RUN);
+        $backoff = min($backoff * 2, 60);
+        continue;
+    }
+    if ($sock instanceof MattermostSocket) {
+        $sock->close();
+    }
+}
+
+$app->store->writeListenerStatus('stopped');
+@unlink($pidPath);
+fwrite(STDERR, mmTs() . " mm-listen stopped\n");
+exit(0);
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Process one WebSocket event. Returns true iff a task was created. The event-matching rules live in
+ * Intake::matchPostedEvent (pure + unit-tested); here we turn the matched text into a task — via
+ * Claude when LLM interpretation is enabled, otherwise the built-in heuristic — and add the ✅.
+ *
+ * @param array<string,mixed> $evt
+ * @param array<string,mixed> $cfg
+ */
+function mmHandleEvent(App $app, Mattermost $mm, array $evt, string $myUserId, array $cfg): bool
+{
+    $m = Intake::matchPostedEvent($evt, $myUserId, (string) $cfg['intake_tag'], (string) $cfg['intake_channel']);
+    if ($m === null) {
+        return false;
+    }
+
+    $task = null;
+    if (!empty($cfg['intake_llm'])) {
+        $task = mmLlmTask($app, $mm, $m, (string) $cfg['intake_project']);
+        if ($task === null) {
+            fwrite(STDERR, mmTs() . " Claude interpretation unavailable — using built-in parsing\n");
+        }
+    }
+    if ($task === null) {
+        // Built-in heuristic (LLM disabled, or it failed — never wedge on an API hiccup).
+        $parsed = Intake::parse($m['rest'], (string) $cfg['intake_project']);
+        if ($parsed === null) {
+            return false;
+        }
+        $task = $parsed;
+    }
+
+    $app->tasks->create($task['title'], $task['description'], $task['status'], $task['project']);
+
+    // Acknowledge with a ✅ reaction (non-fatal: the task already exists; reactions don't generate
+    // `posted` events, so this can't re-trigger intake).
+    if ($m['post_id'] !== '') {
+        try {
+            $mm->addReaction($m['post_id'], $myUserId, 'white_check_mark');
+        } catch (\Throwable) {
+            // ignore — confirmation is best-effort
+        }
+    }
+    return true;
+}
+
+/**
+ * Interpret a matched message with the local `claude` CLI. Pulls the replied-to message (thread root)
+ * as context so "@Claude create task" on a colleague's message works. Returns a task array, or null on
+ * ANY failure (CLI missing, timeout, bad output) so the caller falls back to the built-in parser.
+ *
+ * @param array{post_id:string,root_id:string,rest:string} $m
+ * @return array{title:string,description:string,project:string,status:string}|null
+ */
+function mmLlmTask(App $app, Mattermost $mm, array $m, string $defaultProject): ?array
+{
+    try {
+        // Context = the message this command replies to (its thread root), if any.
+        $context = '';
+        if ($m['root_id'] !== '') {
+            try {
+                $root = $mm->getPost($m['root_id']);
+                $context = (string) ($root['message'] ?? '');
+            } catch (\Throwable) {
+                // no context is fine — proceed with just the instruction
+            }
+        }
+        $request = $m['rest'];
+        if ($request === '' && $context === '') {
+            return null; // nothing to act on
+        }
+        if ($request === '') {
+            $request = 'Create a task from the referenced message.';
+        }
+
+        $cli = new ClaudeCli();
+        if (!$cli->isAvailable()) {
+            return null; // no claude CLI on this machine — fall back to the heuristic
+        }
+        // A CLI call can take several seconds; keep the heartbeat fresh so the status dot doesn't
+        // flip to "stale" mid-request.
+        $parsed = $cli->extractTask($request, $context, static function () use ($app): void {
+            $app->store->writeListenerStatus('connected');
+        });
+
+        $title = Intake::sanitizeTitle($parsed['title']);
+        if ($title === '') {
+            $title = Intake::sanitizeTitle($m['rest']); // model gave no title — fall back to the raw text
+        }
+        if ($title === '') {
+            return null;
+        }
+        $project = mb_substr(trim($parsed['project']), 0, 120);
+        if ($project === '') {
+            $project = $defaultProject;
+        }
+        return [
+            'title' => $title,
+            'description' => Intake::sanitizeDescription($parsed['description']),
+            'project' => $project,
+            'status' => $parsed['status'],
+        ];
+    } catch (\Throwable $e) {
+        fwrite(STDERR, mmTs() . " Claude error: " . $e->getMessage() . "\n");
+        return null;
+    }
+}
+
+/** Sleep up to $secs, but wake early (1s granularity) when $run is cleared by a signal. */
+function mmIdle(int $secs, bool &$run): void
+{
+    for ($i = 0; $i < $secs && $run; $i++) {
+        sleep(1);
+    }
+}
+
+function mmTs(): string
+{
+    return gmdate('Y-m-d\TH:i:s\Z');
+}

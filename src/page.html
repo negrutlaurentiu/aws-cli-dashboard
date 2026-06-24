@@ -6,7 +6,7 @@
   <meta name="csrf-token" content="__APP_TOKEN__">
   <title>AWS CLI Dashboard</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%91%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=__ASSET_VER__">
 </head>
 <body>
   <div class="aurora" aria-hidden="true"></div>
@@ -38,7 +38,7 @@
         </select></label>
       <label class="sel-wrap"><span>Show</span>
         <select id="account-filter" aria-label="Show account"></select></label>
-      <button class="btn btn-ghost" id="refresh-all">Refresh all stored-MFA</button>
+      <button class="btn btn-ghost" id="manage-profiles" title="View and delete AWS profiles in ~/.aws">&#9881; Manage profiles</button>
       <button class="btn btn-primary" id="add-account">+ Add account</button>
     </div>
   </header>
@@ -125,6 +125,34 @@
     </div>
   </div>
 
+  <!-- manage AWS profiles -->
+  <div class="modal-backdrop hidden" id="profiles-modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="profiles-title">
+      <div class="modal-head">
+        <h2 id="profiles-title">AWS profiles</h2>
+        <button class="icon-btn" id="profiles-close" aria-label="Close">&times;</button>
+      </div>
+      <p class="modal-intro">Profiles in <code>~/.aws/credentials</code> and <code>~/.aws/config</code>. Deleting removes the
+        profile from both (each backed up to <code>.bak</code> first). It doesn't touch any AWS data.</p>
+      <div class="profiles-list" id="profiles-list"></div>
+    </div>
+  </div>
+
+  <!-- confirmation popup -->
+  <div class="modal-backdrop hidden" id="confirm-modal">
+    <div class="modal confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div class="modal-head">
+        <h2 id="confirm-title">Please confirm</h2>
+        <button class="icon-btn" id="confirm-close" aria-label="Close">&times;</button>
+      </div>
+      <p class="confirm-body" id="confirm-body"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="confirm-ok">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toasts" class="toasts" aria-live="assertive"></div>
 
   <template id="card-tpl">
@@ -190,6 +218,6 @@
     </article>
   </template>
 
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=__ASSET_VER__" defer></script>
 </body>
 </html>

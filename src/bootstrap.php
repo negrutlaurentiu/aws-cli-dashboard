@@ -10,6 +10,11 @@ require __DIR__ . '/Sts.php';
 require __DIR__ . '/Store.php';
 require __DIR__ . '/S3.php';
 require __DIR__ . '/Tasks.php';
+require __DIR__ . '/Intake.php';
+require __DIR__ . '/Mattermost.php';
+require __DIR__ . '/MattermostSocket.php';
+require __DIR__ . '/ClaudeCli.php';
+require __DIR__ . '/ScreenTime.php';
 
 /**
  * Shared configuration + security helpers for the dashboard. Everything here assumes a

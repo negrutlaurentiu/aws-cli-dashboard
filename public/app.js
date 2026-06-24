@@ -4,6 +4,14 @@ const TOKEN = document.querySelector('meta[name="csrf-token"]').content;
 const RING_CIRC = 2 * Math.PI * 19; // matches r=19 in the SVG
 let globalDuration = 129600; // token lifetime in seconds, shared by all accounts
 
+// Close a modal only when the click both starts and ends on the backdrop — so selecting text
+// inside it and releasing the mouse out on the backdrop doesn't close it mid-selection.
+function onBackdrop(el, close) {
+  let downOnSelf = false;
+  el.addEventListener("mousedown", (ev) => { downOnSelf = ev.target === el; });
+  el.addEventListener("click", (ev) => { if (ev.target === el && downOnSelf) close(); });
+}
+
 const state = {
   serverOffset: 0, // serverUnixMs - clientUnixMs
   fetching: false,
@@ -293,19 +301,6 @@ async function doRefresh(el) {
   }
 }
 
-async function refreshAllStored() {
-  const cards = [...grid.querySelectorAll(".card")].filter((el) => el.__acc?.has_secret);
-  if (cards.length === 0) {
-    toast("info", "Nothing to refresh", "No accounts have a stored MFA secret.");
-    return;
-  }
-  toast("info", `Refreshing ${cards.length} account(s)…`, "");
-  for (const el of cards) {
-    // sequential: avoids hammering STS and keeps credential-file writes serialized
-    await doRefresh(el);
-  }
-}
-
 async function removeAccount(acc) {
   if (!confirm(`Remove "${acc.label}" from the dashboard?\n\nThis only edits the dashboard config — it does NOT touch ~/.aws/credentials.`)) {
     return;
@@ -554,6 +549,122 @@ async function loadProfiles() {
   } catch (_) { /* non-fatal */ }
 }
 
+/* ---------- confirmation popup (reusable) ---------- */
+
+const confirmModal = $("#confirm-modal");
+let confirmResolver = null;
+
+function confirmPopup({ title, body, okLabel = "Confirm", danger = false }) {
+  if (confirmResolver) { confirmResolver(false); confirmResolver = null; } // never leave a prior one pending
+  $("#confirm-title").textContent = title;
+  $("#confirm-body").textContent = body;
+  const ok = $("#confirm-ok");
+  ok.textContent = okLabel;
+  ok.classList.toggle("danger", !!danger);
+  confirmModal.classList.remove("hidden");
+  ok.focus();
+  return new Promise((resolve) => { confirmResolver = resolve; });
+}
+
+function closeConfirm(result) {
+  confirmModal.classList.add("hidden");
+  const r = confirmResolver;
+  confirmResolver = null;
+  if (r) r(result);
+}
+
+$("#confirm-ok").addEventListener("click", () => closeConfirm(true));
+$("#confirm-cancel").addEventListener("click", () => closeConfirm(false));
+$("#confirm-close").addEventListener("click", () => closeConfirm(false));
+onBackdrop(confirmModal, () => closeConfirm(false));
+
+/* ---------- manage AWS profiles ---------- */
+
+const profilesModal = $("#profiles-modal");
+
+async function openProfilesModal() {
+  const list = $("#profiles-list");
+  list.textContent = "";
+  const loading = document.createElement("p");
+  loading.className = "muted"; loading.textContent = "Loading…";
+  list.appendChild(loading);
+  profilesModal.classList.remove("hidden");
+  try {
+    const data = await api("/api/profiles");
+    const accounts = [...grid.querySelectorAll(".card")].map((el) => el.__acc).filter(Boolean);
+    renderProfilesList(data.profiles || [], accounts);
+  } catch (e) {
+    list.textContent = "";
+    const p = document.createElement("p");
+    p.className = "err-text"; p.textContent = "Couldn't load profiles: " + e.message;
+    list.appendChild(p);
+  }
+}
+
+function renderProfilesList(profiles, accounts) {
+  const list = $("#profiles-list");
+  list.textContent = "";
+  if (!profiles.length) {
+    const p = document.createElement("p");
+    p.className = "muted"; p.textContent = "No profiles found in ~/.aws.";
+    list.appendChild(p);
+    return;
+  }
+  profiles.forEach((name) => {
+    const row = document.createElement("div");
+    row.className = "profile-row";
+    const left = document.createElement("div");
+    left.className = "profile-name";
+    const nm = document.createElement("span");
+    nm.className = "pr-name"; nm.textContent = name;
+    left.appendChild(nm);
+    const usedBy = accounts
+      .filter((a) => a.source_profile === name || a.target_profile === name)
+      .map((a) => a.label);
+    if (name === "default") {
+      const tag = document.createElement("span"); tag.className = "pr-tag"; tag.textContent = "default";
+      left.appendChild(tag);
+    } else if (usedBy.length) {
+      const tag = document.createElement("span");
+      tag.className = "pr-tag account"; tag.textContent = "account: " + usedBy.join(", ");
+      left.appendChild(tag);
+    }
+    const del = document.createElement("button");
+    del.className = "btn-mini danger"; del.textContent = "Delete";
+    if (name === "default") {
+      del.disabled = true; del.title = "The [default] profile can't be deleted here";
+    } else {
+      del.addEventListener("click", () => deleteProfile(name, usedBy));
+    }
+    row.appendChild(left);
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
+async function deleteProfile(name, usedBy) {
+  let body = `Delete the AWS profile "${name}"?\n\nThis removes it from ~/.aws/credentials and ~/.aws/config (each backed up to .bak first). It does NOT touch any AWS data.`;
+  if (usedBy && usedBy.length) {
+    body += `\n\n⚠ Used by the dashboard account(s): ${usedBy.join(", ")} — those will stop working until you refresh/recreate them.`;
+  }
+  const ok = await confirmPopup({ title: `Delete profile "${name}"`, body, okLabel: "Delete profile", danger: true });
+  if (!ok) return;
+  try {
+    const r = await api("/api/profiles/delete", { method: "POST", body: { profile: name } });
+    const where = Object.entries(r.removed || {}).map(([f, n]) => `${f} (${n})`).join(", ");
+    toast("ok", `Deleted profile "${name}"`, where || "removed");
+    await openProfilesModal();  // refresh the list in place
+    loadAccounts();
+    loadDefaultSelect();
+  } catch (e) {
+    toast("err", "Couldn't delete profile", e.message);
+  }
+}
+
+$("#manage-profiles").addEventListener("click", openProfilesModal);
+$("#profiles-close").addEventListener("click", () => profilesModal.classList.add("hidden"));
+onBackdrop(profilesModal, () => profilesModal.classList.add("hidden"));
+
 /* ---------- toasts + utils ---------- */
 
 function toast(kind, title, detail) {
@@ -604,16 +715,18 @@ function cssEscape(str) {
 
 $("#add-account").addEventListener("click", () => openModal());
 $("#add-account-empty").addEventListener("click", () => openModal());
-$("#refresh-all").addEventListener("click", refreshAllStored);
 acctFilter.addEventListener("change", applyAccountFilter);
 $("#duration-select").addEventListener("change", saveDuration);
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-cancel").addEventListener("click", closeModal);
 $("#dp-recheck").addEventListener("click", loadDefaultPanel);
 $("#dp-apply").addEventListener("click", applyDefault);
-modal.addEventListener("click", (ev) => { if (ev.target === modal) closeModal(); });
+onBackdrop(modal, closeModal);
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && !modal.classList.contains("hidden")) closeModal();
+  if (ev.key !== "Escape") return;
+  if (!confirmModal.classList.contains("hidden")) closeConfirm(false);
+  else if (!profilesModal.classList.contains("hidden")) profilesModal.classList.add("hidden");
+  else if (!modal.classList.contains("hidden")) closeModal();
 });
 
 loadAccounts();

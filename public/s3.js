@@ -3,8 +3,17 @@
 const TOKEN = document.querySelector('meta[name="csrf-token"]').content;
 const $ = (s, r = document) => r.querySelector(s);
 
+// Close a modal only when the click both starts and ends on the backdrop — so selecting text
+// inside it and releasing the mouse out on the backdrop doesn't close it mid-selection.
+function onBackdrop(el, close) {
+  let downOnSelf = false;
+  el.addEventListener("mousedown", (ev) => { downOnSelf = ev.target === el; });
+  el.addEventListener("click", (ev) => { if (ev.target === el && downOnSelf) close(); });
+}
+
 const state = {
   accounts: [],
+  profiles: [],            // every profile name from ~/.aws (credentials + config)
   profile: "",
   view: "buckets",          // "buckets" | "objects"
   buckets: [],
@@ -52,34 +61,65 @@ function objectUrl(key, dl) {
 
 async function init() {
   try {
-    const res = await fetch("/api/accounts", { headers: { "X-CSRF-Token": TOKEN } });
-    const data = await res.json();
-    if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
-    state.accounts = (data.accounts || []).map((a) => ({ id: a.id, label: a.label, target_profile: a.target_profile }));
+    const [aRes, pRes] = await Promise.all([
+      fetch("/api/accounts", { headers: { "X-CSRF-Token": TOKEN } }),
+      fetch("/api/profiles", { headers: { "X-CSRF-Token": TOKEN } }),
+    ]);
+    const aData = await aRes.json();
+    const pData = await pRes.json();
+    if (!aRes.ok || aData.ok === false) throw new Error(aData.error || `HTTP ${aRes.status}`);
+    if (!pRes.ok || pData.ok === false) throw new Error(pData.error || `HTTP ${pRes.status}`);
+    state.accounts = (aData.accounts || []).map((a) => ({
+      id: a.id, label: a.label, source_profile: a.source_profile, target_profile: a.target_profile,
+    }));
+    state.profiles = pData.profiles || [];
   } catch (e) {
-    setStatus(`Couldn't load accounts: ${e.message}`, "err");
+    setStatus(`Couldn't load profiles: ${e.message}`, "err");
     return;
   }
-  if (state.accounts.length === 0) {
-    setStatus("No accounts configured yet. Add one on the Credentials page first.", "err");
+  buildProfileSelect();
+  if (!els.account.options.length) {
+    setStatus("No AWS profiles found. Add an account on the Credentials page, or set up ~/.aws/credentials.", "err");
     return;
   }
-  els.account.innerHTML = "";
-  state.accounts.forEach((a) => {
-    const o = document.createElement("option");
-    o.value = a.id;
-    o.textContent = `${a.label}  (${a.target_profile})`;
-    els.account.appendChild(o);
-  });
-  const saved = localStorage.getItem("awsdash.account");
-  if (saved && state.accounts.some((a) => a.id === saved)) els.account.value = saved;
-  await onAccountChange();
+  const saved = localStorage.getItem("awsdash.profile");
+  if (saved && [...els.account.options].some((o) => o.value === saved)) els.account.value = saved;
+  await onProfileChange();
 }
 
-async function onAccountChange() {
-  const acc = state.accounts.find((a) => a.id === els.account.value) || state.accounts[0];
-  localStorage.setItem("awsdash.account", acc.id);
-  state.profile = acc.target_profile;
+// Group the selector: dashboard accounts (with their label) first, then every other ~/.aws profile.
+function buildProfileSelect() {
+  const sel = els.account;
+  sel.innerHTML = "";
+  const accountTargets = new Set(state.accounts.map((a) => a.target_profile));
+  if (state.accounts.length) {
+    const og = document.createElement("optgroup");
+    og.label = "Accounts";
+    state.accounts.forEach((a) => {
+      const o = document.createElement("option");
+      o.value = a.target_profile;
+      o.textContent = `${a.label}  (${a.target_profile})`;
+      og.appendChild(o);
+    });
+    sel.appendChild(og);
+  }
+  const others = state.profiles.filter((p) => !accountTargets.has(p));
+  if (others.length) {
+    const og = document.createElement("optgroup");
+    og.label = "Other profiles";
+    others.forEach((p) => {
+      const o = document.createElement("option");
+      o.value = p;
+      o.textContent = p;
+      og.appendChild(o);
+    });
+    sel.appendChild(og);
+  }
+}
+
+async function onProfileChange() {
+  state.profile = els.account.value;
+  localStorage.setItem("awsdash.profile", state.profile);
   await loadBuckets();
 }
 
@@ -515,12 +555,12 @@ function toast(kind, title, detail) {
 
 /* ---------- wire up ---------- */
 
-els.account.addEventListener("change", onAccountChange);
+els.account.addEventListener("change", onProfileChange);
 els.filter.addEventListener("input", onFilterInput);
 $("#reload-btn").addEventListener("click", () => (state.view === "buckets" ? loadBuckets() : loadObjects(state.pageIndex)));
 els.download.addEventListener("click", () => downloadFolder(state.bucket, state.prefix));
 $("#viewer-close").addEventListener("click", closeViewer);
-viewer.addEventListener("click", (ev) => { if (ev.target === viewer) closeViewer(); });
+onBackdrop(viewer, closeViewer);
 $("#dl-close").addEventListener("click", () => $("#dl-panel").classList.add("hidden"));
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && !viewer.classList.contains("hidden")) closeViewer();

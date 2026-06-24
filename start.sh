@@ -44,6 +44,16 @@ fi
 
 # Multiple workers so streaming a file or running an S3 download doesn't block the UI.
 export PHP_CLI_SERVER_WORKERS="${PHP_CLI_SERVER_WORKERS:-8}"
-# Allow reasonably large task attachments (screenshots, PDFs).
-exec php -d upload_max_filesize=64M -d post_max_size=66M \
+
+# @Claude intake listener: holds a Mattermost WebSocket open and turns "@Claude …" messages into
+# tasks. Launched in the background and tied to this script's lifetime (the trap stops it on exit),
+# so the listener and the dashboard live and die together. It idles when intake is disabled in
+# settings, so it's always safe to start; a flock singleton means a stray second copy is harmless.
+php "$DIR/bin/mm-listen" >>"$DIR/config/mm-listen.log" 2>&1 &
+LISTENER_PID=$!
+trap 'kill "$LISTENER_PID" 2>/dev/null || true' EXIT INT TERM
+
+# Allow reasonably large task attachments (screenshots, PDFs). Run in the foreground (not exec) so
+# the trap above fires and reaps the listener when the server stops.
+php -d upload_max_filesize=64M -d post_max_size=66M \
   -S "$HOST:$PORT" -t "$DIR/public" "$DIR/public/router.php"

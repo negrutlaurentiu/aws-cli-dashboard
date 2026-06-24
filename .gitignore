@@ -3,6 +3,7 @@
 /config/state.json
 /config/settings.json
 /config/tasks.json
+/config/mattermost.json
 /config/*.local.json
 
 # Task attachments (user files / screenshots) — local only
@@ -21,3 +22,9 @@ credentials.bak
 *~
 /config/tasks.json.lock
 /config/*.tmp.*
+
+# @Claude intake listener (bin/mm-listen) runtime artifacts — local only
+/config/mm-listen.lock
+/config/mm-listen.pid
+/config/mm-listen.status
+/config/mm-listen.log

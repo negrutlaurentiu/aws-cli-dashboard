@@ -174,6 +174,39 @@ final class CredentialsFile
         }
     }
 
+    /**
+     * Remove every section whose name exactly equals $name (a profile can legally appear more than
+     * once in the shared file) along with the lines that belong to it. Returns how many sections
+     * were removed. The match is exact string equality — never a path — so there is no traversal
+     * surface; only the named profile's own block is touched, every other profile is preserved.
+     */
+    public function removeProfile(string $name): int
+    {
+        $before = count($this->sections);
+        $this->sections = array_values(array_filter(
+            $this->sections,
+            static fn (array $s): bool => $s['name'] !== $name
+        ));
+        return $before - count($this->sections);
+    }
+
+    /**
+     * Remove profile sections from a ~/.aws/CONFIG file. There a profile is written
+     * `[profile <name>]` (only `[default]` is bare), so we match the "profile " form — tolerant of
+     * the extra whitespace the aws CLI permits (`[profile   name]`). A bare `[name]` config section
+     * is NOT the profile `name` and is deliberately left untouched. Returns how many were removed.
+     */
+    public function removeConfigProfile(string $name): int
+    {
+        $re = '/^profile\s+' . preg_quote($name, '/') . '$/';
+        $before = count($this->sections);
+        $this->sections = array_values(array_filter(
+            $this->sections,
+            static fn (array $s): bool => preg_match($re, $s['name']) !== 1
+        ));
+        return $before - count($this->sections);
+    }
+
     public function render(): string
     {
         $out = [];

@@ -1,0 +1,15 @@
+{
+  "base_url": "https://mattermost.example.com",
+  "team": "your-team-slug",
+  "checkin_channel": "check-in",
+  "checkout_channel": "check-out",
+  "token": "REDACTED_PERSONAL_OR_BOT_ACCESS_TOKEN",
+  "checkin_channel_id": "",
+  "checkout_channel_id": "",
+  "checkout_show_hours": true,
+  "intake_enabled": false,
+  "intake_tag": "@Claude",
+  "intake_project": "",
+  "intake_channel": "",
+  "intake_llm": false
+}

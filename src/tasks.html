@@ -6,7 +6,7 @@
   <meta name="csrf-token" content="__APP_TOKEN__">
   <title>Tasks · AWS CLI Dashboard</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%85%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=__ASSET_VER__">
 </head>
 <body>
   <div class="aurora" aria-hidden="true"></div>
@@ -25,9 +25,42 @@
       <a href="/tasks" class="nav-link active">Tasks</a>
     </nav>
     <div class="topbar-actions">
-      <span class="now-timer" id="now-timer" title="Active work timer"></span>
-      <button class="btn btn-ghost" id="open-summary">&#128197; Weekly summary</button>
-      <button class="btn btn-primary" id="add-task">+ Add task</button>
+      <!-- passive live status (read-only; updated by tick()/renderScreenTime()) -->
+      <div class="tb-status" role="group" aria-label="Status">
+        <span class="screen-time" id="screen-time" title="macOS Screen Time — computer-active time today"></span>
+        <span class="now-timer" id="now-timer" title="Active work timer"></span>
+        <span class="today-total" id="today-total" title="Worked today across the highlighted tasks"></span>
+      </div>
+
+      <!-- board display toggles (segmented control); .tb-seg pins this and all that follows to the right -->
+      <div class="tb-seg" role="group" aria-label="Board view">
+        <button class="btn btn-seg" id="today-view" title="Highlight only the tasks you worked on (or finished) today — for check-out">&#128198; Today</button>
+        <button class="btn btn-seg" id="age-toggle" title="Show how long ago each task was added">&#128337; Age</button>
+        <button class="btn btn-seg" id="select-mode" title="Select tasks to sum their time vs. your computer time">&#9638; Select</button>
+      </div>
+
+      <span class="tb-divider" aria-hidden="true"></span>
+
+      <!-- mattermost daily ritual (always visible) -->
+      <div class="tb-group" role="group" aria-label="Mattermost">
+        <button class="mm-dot is-off" id="mm-listener-dot" title="@Claude listener" aria-label="@Claude listener status"></button>
+        <button class="btn btn-ghost" id="mm-checkin" title="Post your In Progress &amp; Pending tasks to the check-in channel">&#128229; Check in</button>
+        <button class="btn btn-ghost" id="mm-checkout" title="Post today's finished tasks to the check-out channel">&#128228; Check out</button>
+      </div>
+
+      <span class="tb-divider" aria-hidden="true"></span>
+
+      <!-- secondary actions menu (hand-built popover) -->
+      <div class="tb-menu-wrap">
+        <button class="btn btn-ghost tb-menu-trigger" id="more-menu-trigger"
+                aria-haspopup="menu" aria-expanded="false" aria-controls="more-menu" title="More">&#8943; More</button>
+        <div class="tb-menu hidden" id="more-menu" role="menu" aria-label="More actions">
+          <button class="tb-menu-item" id="open-summary" role="menuitem">&#128197; Weekly summary</button>
+          <button class="tb-menu-item" id="mm-settings" role="menuitem" aria-label="Mattermost settings">&#9881; Mattermost settings</button>
+        </div>
+      </div>
+
+      <button class="btn btn-primary tb-add" id="add-task">+ Add task</button>
     </div>
   </header>
 
@@ -42,6 +75,8 @@
         <button class="icon-btn" id="add-close" aria-label="Close">&times;</button></div>
       <form id="add-form" autocomplete="off">
         <div class="field"><label>Title</label><input name="title" required placeholder="What needs doing?"></div>
+        <div class="field"><label>Project <span class="opt">optional</span></label>
+          <input name="project" list="task-projects" placeholder="Reperks, Virtuosity, BTK…"></div>
         <div class="field"><label>Description <span class="opt">optional</span></label>
           <textarea name="description" rows="4" placeholder="Details, links, context…"></textarea></div>
         <div class="modal-foot">
@@ -93,6 +128,96 @@
     </div>
   </div>
 
+  <!-- mattermost settings -->
+  <div class="modal-backdrop hidden" id="mm-modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mm-title">
+      <div class="modal-head"><h2 id="mm-title">Mattermost</h2>
+        <button class="icon-btn" id="mm-close" aria-label="Close">&times;</button></div>
+      <form id="mm-form" autocomplete="off">
+        <div class="field"><label>Server URL</label>
+          <input name="base_url" placeholder="https://mattermost.hypersense-software.com"></div>
+        <div class="field"><label>Team <span class="opt">slug from the channel URL</span></label>
+          <input name="team" placeholder="hypersense-software"></div>
+        <div class="field-row">
+          <div class="field"><label>Check-in channel</label><input name="checkin_channel" placeholder="check-in"></div>
+          <div class="field"><label>Check-out channel</label><input name="checkout_channel" placeholder="check-out"></div>
+        </div>
+        <label class="check-row mm-check"><input type="checkbox" name="checkout_show_hours"> Include worked hours (per-task times &amp; the daily total) in the check-out post <span class="opt">default &mdash; you can still flip this per check-out</span></label>
+        <div class="field"><label>Access token <span class="opt">personal, bot, or session token</span></label>
+          <input name="token" type="password" autocomplete="new-password" placeholder="leave blank to keep current">
+          <span class="hint">Posts appear as whoever owns this token. A browser session token (MMAUTHTOKEN) works too, but expires &mdash; a personal or bot token is durable. Stored locally (0600), never sent back.</span></div>
+
+        <hr class="mm-sep">
+        <label class="check-row mm-check"><input type="checkbox" name="intake_enabled"> Enable <b>@Claude</b> intake <span class="opt">watch your messages over the WebSocket and create tasks</span></label>
+        <div class="field-row">
+          <div class="field"><label>Trigger tag</label><input name="intake_tag" placeholder="@Claude"></div>
+          <div class="field"><label>Default project <span class="opt">optional</span></label><input name="intake_project" list="task-projects" placeholder="(none)"></div>
+        </div>
+        <div class="field"><label>Limit to channel <span class="opt">optional &mdash; blank = any channel you're in</span></label>
+          <input name="intake_channel" placeholder="e.g. check-in (blank for all)">
+          <span class="hint">Type <b>@Claude fix the login bug</b> in Mattermost and it becomes a task. Inline tokens (optional): <code>proj:Name</code> or <code>#Name</code> set the project; <code>!progress</code> / <code>!review</code> / <code>!done</code> set the status. A &#9989; on your message confirms it. Only <b>your own</b> messages trigger it. Needs the dashboard running (the listener auto-starts with it).</span></div>
+
+        <label class="check-row mm-check"><input type="checkbox" name="intake_llm"> Interpret messages with <b>Claude</b> <span class="opt">uses your local <code>claude</code> CLI (the subscription you're logged into &mdash; no API key); infers title, project, description &amp; status, and reads the message you reply to</span></label>
+        <p class="hint" id="mm-claude-hint"></p>
+
+        <div class="mm-listener-row">
+          <span class="mm-listener" id="mm-listener-line"></span>
+          <button type="button" class="btn-mini" id="mm-listener-restart">Restart listener</button>
+        </div>
+        <p class="mm-status" id="mm-status"></p>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" id="mm-test">Test connection</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- check-in / check-out preview + confirm -->
+  <div class="modal-backdrop hidden" id="mm-preview-modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mm-preview-title">
+      <div class="modal-head"><h2 id="mm-preview-title">Preview</h2>
+        <button class="icon-btn" id="mm-preview-close" aria-label="Close">&times;</button></div>
+      <p class="detail-dim" id="mm-preview-sub"></p>
+      <label class="check-row mm-check hidden" id="mm-hours-row"><input type="checkbox" id="mm-include-hours"> Include worked hours (per-task times &amp; total)</label>
+      <textarea class="mm-preview" id="mm-preview-body" spellcheck="false" aria-label="Message to post"></textarea>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" id="mm-preview-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="mm-preview-send">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- screen time breakdown -->
+  <div class="modal-backdrop hidden" id="st-modal">
+    <div class="modal summary-modal" role="dialog" aria-modal="true" aria-labelledby="st-title">
+      <div class="modal-head">
+        <h2 id="st-title">Computer time today</h2>
+        <button class="icon-btn" id="st-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="summary-body" id="st-body"></div>
+    </div>
+  </div>
+
+  <!-- selection compare bar (select-mode) -->
+  <div class="select-bar hidden" id="select-bar" role="region" aria-label="Selection summary">
+    <div class="sb-stats">
+      <span class="sb-item"><b id="sb-count">0</b> selected</span>
+      <span class="sb-sep">·</span>
+      <span class="sb-item">tracked today <b id="sb-tracked">0s</b></span>
+      <span class="sb-sep">·</span>
+      <span class="sb-item">computer <b id="sb-computer">—</b></span>
+      <span class="sb-sep">·</span>
+      <span class="sb-item sb-gap" id="sb-gap-wrap">gap <b id="sb-gap">—</b></span>
+    </div>
+    <div class="sb-actions">
+      <button class="btn-mini" id="sb-clear">Clear</button>
+      <button class="btn-mini" id="sb-done">Done</button>
+    </div>
+  </div>
+
+  <datalist id="task-projects"></datalist>
+
   <div id="toasts" class="toasts" aria-live="assertive"></div>
 
   <template id="column-tpl">
@@ -105,6 +230,7 @@
         </span>
       </div>
       <div class="col-compose hidden">
+        <input class="col-compose-project" list="task-projects" placeholder="project (optional)" aria-label="Project">
         <input class="col-compose-input" placeholder="Task title — Enter to add, Esc to close" aria-label="New task title">
       </div>
       <div class="col-list"></div>
@@ -113,18 +239,22 @@
 
   <template id="card-tpl">
     <article class="task-card" draggable="true">
-      <h4 class="task-title"></h4>
+      <div class="task-head">
+        <span class="task-project hidden"></span>
+        <h4 class="task-title"></h4>
+      </div>
       <div class="task-meta">
         <span class="task-since"></span>
         <span class="task-attach"></span>
       </div>
       <div class="task-timer-row">
         <span class="task-worked"></span>
+        <span class="task-today"></span>
         <button class="task-timer btn-mini"></button>
       </div>
     </article>
   </template>
 
-  <script src="/tasks.js" defer></script>
+  <script src="/tasks.js?v=__ASSET_VER__" defer></script>
 </body>
 </html>
