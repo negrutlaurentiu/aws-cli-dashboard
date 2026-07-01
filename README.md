@@ -61,8 +61,8 @@ No frameworks, no build step, no `node_modules` — just PHP's built-in server a
 ## Quick start
 
 ```bash
-git clone git@github.com:negrutlaurentiu/aws-cli-dashboard.git
-cd aws-cli-dashboard
+git clone <repo-url>          # this repo (HyperSense-Software or your personal remote)
+cd <repo-dir>                 # the directory git created for it
 ./start.sh
 ```
 
@@ -70,6 +70,11 @@ Then open <http://127.0.0.1:8010> (the script tries to open it for you on macOS)
 **“+ Add account.”**
 
 To stop, press `Ctrl+C`.
+
+> 🤖 **Setting up on a fresh machine (or having Claude Code set it up)?** Follow the step-by-step
+> runbook in **[`docs/claude-setup.md`](docs/claude-setup.md)** — it covers prerequisites, the local
+> config files you must create (all secret-bearing files are gitignored and are *not* in the repo),
+> the optional Mattermost / `@Claude` intake / Redmine features, and how to verify the app is up.
 
 ## Adding an account
 

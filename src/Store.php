@@ -19,11 +19,16 @@ final class Store
     private string $settingsPath;
     private string $mattermostPath;
     private string $listenerStatusPath;
+    private string $projectsPath;
+    private string $redminePath;
 
     /** AWS STS get-session-token allows 900s (15 min) to 129600s (36 h) for an IAM user. */
     public const MIN_DURATION = 900;
     public const MAX_DURATION = 129600;
     public const DEFAULT_DURATION = 129600;
+
+    /** Expected worked hours per day, used by the weekly summary's "did I log a full day?" check. */
+    public const DEFAULT_TARGET_HOURS = 8.0;
 
     public function __construct(string $configDir)
     {
@@ -32,6 +37,8 @@ final class Store
         $this->settingsPath = $configDir . '/settings.json';
         $this->mattermostPath = $configDir . '/mattermost.json';
         $this->listenerStatusPath = $configDir . '/mm-listen.status';
+        $this->projectsPath = $configDir . '/projects.json';
+        $this->redminePath = $configDir . '/redmine.json';
         if (!is_dir($configDir)) {
             mkdir($configDir, 0700, true);
         }
@@ -40,6 +47,7 @@ final class Store
     // ---- global settings --------------------------------------------------
 
     /** @return array{duration_seconds:int} global settings shared by every account */
+    /** @return array{duration_seconds:int,daily_target_hours:float,target_weekdays_only:bool} */
     public function settings(): array
     {
         $s = $this->readJson($this->settingsPath);
@@ -47,7 +55,15 @@ final class Store
         if ($dur < self::MIN_DURATION || $dur > self::MAX_DURATION) {
             $dur = self::DEFAULT_DURATION;
         }
-        return ['duration_seconds' => $dur];
+        $hours = (float) ($s['daily_target_hours'] ?? self::DEFAULT_TARGET_HOURS);
+        if ($hours < 0 || $hours > 24) {
+            $hours = self::DEFAULT_TARGET_HOURS;
+        }
+        return [
+            'duration_seconds' => $dur,
+            'daily_target_hours' => $hours,
+            'target_weekdays_only' => (bool) ($s['target_weekdays_only'] ?? true),
+        ];
     }
 
     public function durationSeconds(): int
@@ -55,16 +71,36 @@ final class Store
         return $this->settings()['duration_seconds'];
     }
 
-    /** @param array<string,mixed> $input @return array{duration_seconds:int} */
+    /**
+     * Merge-update global settings (preserves keys the caller doesn't send, so saving the token
+     * lifetime never wipes the weekly-summary target, and vice-versa).
+     *
+     * @param array<string,mixed> $input
+     * @return array{duration_seconds:int,daily_target_hours:float,target_weekdays_only:bool}
+     */
     public function saveSettings(array $input): array
     {
-        $dur = (int) ($input['duration_seconds'] ?? self::DEFAULT_DURATION);
+        $cur = $this->settings();
+
+        $dur = array_key_exists('duration_seconds', $input) ? (int) $input['duration_seconds'] : $cur['duration_seconds'];
         if ($dur < self::MIN_DURATION || $dur > self::MAX_DURATION) {
             throw new \InvalidArgumentException(
                 'Token lifetime must be between ' . self::MIN_DURATION . ' and ' . self::MAX_DURATION . ' seconds.'
             );
         }
-        $this->writeJson($this->settingsPath, ['duration_seconds' => $dur]);
+        $hours = array_key_exists('daily_target_hours', $input) ? (float) $input['daily_target_hours'] : $cur['daily_target_hours'];
+        if ($hours < 0 || $hours > 24) {
+            throw new \InvalidArgumentException('Daily target hours must be between 0 and 24.');
+        }
+        $weekdaysOnly = array_key_exists('target_weekdays_only', $input)
+            ? (bool) $input['target_weekdays_only']
+            : $cur['target_weekdays_only'];
+
+        $this->writeJson($this->settingsPath, [
+            'duration_seconds' => $dur,
+            'daily_target_hours' => $hours,
+            'target_weekdays_only' => $weekdaysOnly,
+        ]);
         return $this->settings();
     }
 
@@ -107,6 +143,14 @@ final class Store
             'intake_project' => (string) ($m['intake_project'] ?? ''),
             'intake_channel' => (string) ($m['intake_channel'] ?? ''),
             'intake_llm' => (bool) ($m['intake_llm'] ?? false),
+            // Read-only auto-responder: reply to COLLEAGUES' status commands with task titles. Opt-in.
+            'autoresponder_enabled' => (bool) ($m['autoresponder_enabled'] ?? false),
+            // Allowlist of usernames who may pull the WEEKLY HOURS report (week/lastweek) — that command
+            // shares worked hours, so it is restricted (titles-only commands stay open to everyone).
+            'autoresponder_week_allow' => array_values(array_filter(
+                (array) ($m['autoresponder_week_allow'] ?? []),
+                static fn ($u) => is_string($u) && $u !== ''
+            )),
         ];
     }
 
@@ -172,6 +216,27 @@ final class Store
         // ---- Optional Claude interpretation (via the local `claude` CLI — no key) ----
         $intakeLlm = array_key_exists('intake_llm', $input) ? (bool) $input['intake_llm'] : $existing['intake_llm'];
 
+        // ---- Read-only colleague auto-responder ----
+        $autoresponder = array_key_exists('autoresponder_enabled', $input)
+            ? (bool) $input['autoresponder_enabled']
+            : $existing['autoresponder_enabled'];
+        // Allowlist for the weekly-hours command: accept a comma/space/newline-separated string (or a
+        // list), normalise to lowercase usernames without a leading @, dedupe, and cap the count.
+        if (array_key_exists('autoresponder_week_allow', $input)) {
+            $raw = $input['autoresponder_week_allow'];
+            $parts = is_array($raw) ? $raw : preg_split('/[\s,;]+/', (string) $raw);
+            $allow = [];
+            foreach ($parts ?: [] as $u) {
+                $u = strtolower(ltrim(trim((string) $u), '@'));
+                if ($u !== '' && !in_array($u, $allow, true)) {
+                    $allow[] = mb_substr($u, 0, 64);
+                }
+            }
+            $weekAllow = array_slice($allow, 0, 50);
+        } else {
+            $weekAllow = $existing['autoresponder_week_allow'];
+        }
+
         $record = [
             'base_url' => $baseUrl,
             'team' => $team,
@@ -186,6 +251,8 @@ final class Store
             'intake_project' => $intakeProject,
             'intake_channel' => $intakeChannel,
             'intake_llm' => $intakeLlm,
+            'autoresponder_enabled' => $autoresponder,
+            'autoresponder_week_allow' => $weekAllow,
         ];
         $this->writeJson($this->mattermostPath, $record);
         return $record;
@@ -259,6 +326,185 @@ final class Store
         }
         $port = isset($p['port']) ? ':' . (int) $p['port'] : '';
         return 'https://' . strtolower((string) $p['host']) . $port;
+    }
+
+    // ---- projects + redmine -----------------------------------------------
+
+    /**
+     * Managed projects (config/projects.json). Each is a display NAME that must match the `project`
+     * string tasks are tagged with (so the weekly summary's per-project hours join to it) plus an
+     * optional Redmine project URL. The Redmine host + project identifier (slug) are derived from
+     * that URL on read (see redmineRef); the raw URL is kept for display/linking.
+     *
+     * @return array<int,array{id:string,name:string,redmine_url:string,redmine:?array{host:string,base_url:string,identifier:string}}>
+     */
+    public function projects(): array
+    {
+        $data = $this->readJson($this->projectsPath);
+        $list = is_array($data['projects'] ?? null) ? $data['projects'] : [];
+        $out = [];
+        foreach ($list as $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            $name = trim((string) ($p['name'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $url = trim((string) ($p['redmine_url'] ?? ''));
+            $out[] = [
+                'id' => (string) ($p['id'] ?? ''),
+                'name' => $name,
+                'redmine_url' => $url,
+                'redmine' => self::redmineRef($url),
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Replace the whole project list (the UI edits it as one form). Every project needs a name; the
+     * Redmine URL is optional but, when present, must be a https .../projects/<identifier> URL —
+     * validated so the API key can later only ever be sent to that operator-named host.
+     *
+     * @param array<string,mixed> $input expects {projects: [{id?,name,redmine_url?}]}
+     * @return array<int,array{id:string,name:string,redmine_url:string}>
+     */
+    public function saveProjects(array $input): array
+    {
+        $list = is_array($input['projects'] ?? null) ? $input['projects'] : [];
+        $records = [];
+        foreach ($list as $p) {
+            if (!is_array($p)) {
+                continue;
+            }
+            $name = mb_substr(trim((string) ($p['name'] ?? '')), 0, 120);
+            if ($name === '') {
+                throw new \InvalidArgumentException('Every project needs a name (the same name you tag tasks with).');
+            }
+            $url = trim((string) ($p['redmine_url'] ?? ''));
+            if ($url !== '' && self::redmineRef($url) === null) {
+                throw new \InvalidArgumentException("“{$name}”: the Redmine URL must look like https://redmine.example.com/projects/the-slug.");
+            }
+            $id = trim((string) ($p['id'] ?? ''));
+            $taken = array_map(static fn (array $r): string => $r['id'], $records);
+            if ($id === '' || in_array($id, $taken, true)) {
+                $id = $this->slug($name, $records);
+            }
+            $records[] = ['id' => $id, 'name' => $name, 'redmine_url' => $url];
+        }
+        if (count($records) > 200) {
+            throw new \InvalidArgumentException('Too many projects.');
+        }
+        $this->writeJson($this->projectsPath, ['projects' => $records]);
+        return $records;
+    }
+
+    /**
+     * Redmine API keys, keyed by HOST (config/redmine.json). One key per Redmine instance
+     * (designli, hypersense, …) is shared by all projects on that host. The key is a SECRET: stored
+     * 0600, only ever sent to its own host (over the TLS-verified Redmine client), and never
+     * returned to the browser (the API exposes has_key only).
+     *
+     * @return array<string,array{api_key:string}>
+     */
+    public function redmineInstances(): array
+    {
+        $data = $this->readJson($this->redminePath);
+        $inst = is_array($data['instances'] ?? null) ? $data['instances'] : [];
+        $out = [];
+        foreach ($inst as $host => $v) {
+            $host = strtolower(trim((string) $host));
+            if ($host === '' || !is_array($v)) {
+                continue;
+            }
+            $key = (string) ($v['api_key'] ?? '');
+            if ($key !== '') {
+                $out[$host] = ['api_key' => $key];
+            }
+        }
+        return $out;
+    }
+
+    public function redmineApiKeyForHost(string $host): string
+    {
+        return $this->redmineInstances()[strtolower(trim($host))]['api_key'] ?? '';
+    }
+
+    /**
+     * Merge-update the per-host Redmine API keys. Follows the same "leave blank to keep" rule as the
+     * Mattermost token, so re-saving never forces re-typing a key; a host listed in $clear is
+     * forgotten. Hosts are validated as bare hostnames, keys as Redmine-style tokens.
+     *
+     * @param array<string,mixed> $keys  host => api_key ('' = keep existing)
+     * @param array<int,string>   $clear hosts to remove
+     * @return array<string,array{api_key:string}>
+     */
+    public function saveRedmineKeys(array $keys, array $clear = []): array
+    {
+        $cur = $this->redmineInstances();
+        foreach ($keys as $host => $key) {
+            $host = strtolower(trim((string) $host));
+            if ($host === '' || !preg_match('/^[a-z0-9.-]+$/', $host)) {
+                continue;
+            }
+            $key = trim((string) $key);
+            if ($key === '') {
+                continue; // leave blank to keep the stored key
+            }
+            if (!preg_match('/^[A-Za-z0-9]{8,128}$/', $key)) {
+                throw new \InvalidArgumentException("That does not look like a Redmine API key for {$host} (the access key from your Redmine account page).");
+            }
+            $cur[$host] = ['api_key' => $key];
+        }
+        foreach ($clear as $host) {
+            $host = strtolower(trim((string) $host));
+            if ($host !== '') {
+                unset($cur[$host]);
+            }
+        }
+        $this->writeJson($this->redminePath, ['instances' => $cur]);
+        return $cur;
+    }
+
+    /**
+     * Parse a Redmine project URL into {host, base_url, identifier}, or null if it isn't a
+     * https://…/projects/<identifier> URL. Used both to validate on save and to build the API base
+     * URL + project id at call time — so the key is only ever sent to this exact host. Rejecting
+     * any userinfo and requiring https is the same defence as Store::normalizeBaseUrl.
+     *
+     * @return array{host:string,base_url:string,identifier:string}|null
+     */
+    public static function redmineRef(string $url): ?array
+    {
+        $url = trim($url);
+        if ($url === '') {
+            return null;
+        }
+        $p = parse_url($url);
+        if ($p === false || ($p['scheme'] ?? '') !== 'https' || empty($p['host'])) {
+            return null;
+        }
+        if (!empty($p['user']) || !empty($p['pass'])) {
+            return null;
+        }
+        $path = trim((string) ($p['path'] ?? ''), '/');
+        // …/projects/<identifier>[/anything] — Redmine identifiers are [a-z0-9_-] (lower-case slug).
+        if (!preg_match('#^projects/([A-Za-z0-9][A-Za-z0-9_-]*)#', $path, $m)) {
+            return null;
+        }
+        $host = strtolower((string) $p['host']);
+        // Keep the host charset in lockstep with saveRedmineKeys's check so a project can never point
+        // at a host that could never hold a key (e.g. an underscore/punycode host parse_url accepts).
+        if (!preg_match('/^[a-z0-9.-]+$/', $host)) {
+            return null;
+        }
+        $port = isset($p['port']) ? ':' . (int) $p['port'] : '';
+        return [
+            'host' => $host,
+            'base_url' => 'https://' . $host . $port,
+            'identifier' => $m[1],
+        ];
     }
 
     // ---- accounts ---------------------------------------------------------

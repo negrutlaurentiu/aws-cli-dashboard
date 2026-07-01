@@ -14,6 +14,12 @@ final class Tasks
 {
     public const STATUSES = ['pending', 'in_progress', 'review', 'done', 'archived'];
 
+    /** Task priority. Default is 'medium' — anything unrecognised normalises to it. */
+    public const PRIORITIES = ['low', 'medium', 'high'];
+    private const DEFAULT_PRIORITY = 'medium';
+    /** A single free-form category per task (e.g. "AWS Terraform", "frontend"); length-capped. */
+    private const LABEL_MAX = 40;
+
     /** Time is logged in 15-minute units; a worked block rounds UP to the next quarter-hour. */
     private const QUARTER = 900;
     /** A start→stop shorter than this is treated as an accidental tap and banks no time. */
@@ -81,7 +87,7 @@ final class Tasks
 
     // ---- mutations --------------------------------------------------------
 
-    public function create(string $title, string $description, string $status = 'pending', string $project = ''): array
+    public function create(string $title, string $description, string $status = 'pending', string $project = '', string $label = '', string $priority = self::DEFAULT_PRIORITY): array
     {
         $lock = $this->acquireLock();
         $title = trim($title);
@@ -96,6 +102,8 @@ final class Tasks
             'id' => 't-' . bin2hex(random_bytes(6)),
             'title' => $title,
             'project' => mb_substr(trim($project), 0, 120),
+            'label' => $this->normLabel($label),
+            'priority' => $this->normPriority($priority),
             'description' => trim($description),
             'status' => $status,
             'created_at' => $nowIso,
@@ -134,6 +142,12 @@ final class Tasks
             }
             if (array_key_exists('project', $fields)) {
                 $t['project'] = mb_substr(trim((string) $fields['project']), 0, 120);
+            }
+            if (array_key_exists('label', $fields)) {
+                $t['label'] = $this->normLabel((string) $fields['label']);
+            }
+            if (array_key_exists('priority', $fields)) {
+                $t['priority'] = $this->normPriority((string) $fields['priority']);
             }
             if (array_key_exists('status', $fields)) {
                 $status = (string) $fields['status'];
@@ -473,9 +487,10 @@ final class Tasks
      *
      * @return array<string,mixed>
      */
-    public function weekSummary(int $refTs, ?int $now = null): array
+    public function weekSummary(int $refTs, ?int $now = null, float $targetHours = 8.0, bool $weekdaysOnly = true): array
     {
         $now ??= time();
+        $targetSecs = max(0, (int) round($targetHours * 3600)); // expected worked seconds per working day
         $dow = (int) date('N', $refTs);              // 1=Mon..7=Sun
         $weekStartTs = strtotime('today', $refTs) - ($dow - 1) * 86400;
         // Pin to local midnight, then walk 7 DST-aware day boundaries (a day may be 23/24/25h).
@@ -505,7 +520,19 @@ final class Tasks
         $days = [];
         $projectTotals = [];
         $total = 0;
+        $totalExpected = 0; // sum of the per-working-day target across the week
+        $totalShort = 0;    // sum of (target - logged) over working days that fell short
         foreach ($dayBounds as $db) {
+            $weekday = (int) date('N', $db['start']);          // 1=Mon..7=Sun
+            $workingDay = !$weekdaysOnly || $weekday <= 5;     // weekends aren't expected (unless configured)
+            $started = $now >= $db['start'];                   // the day has begun
+            $elapsed = $now >= $db['end'];                     // the day is fully over
+            // Only a fully-elapsed working day is "due" — so the CURRENT week never flags today's
+            // remaining hours or future days as "short" (that would invent missing hours that can't
+            // exist yet). For a past week, every day is elapsed and counts normally.
+            $countable = $workingDay && $elapsed;
+            $expected = $workingDay ? $targetSecs : 0;
+
             $projects = []; // project key => ['project','seconds','tasks'[]]
             $daySecs = 0;
             foreach ($raw as $t) {
@@ -529,8 +556,15 @@ final class Tasks
                 $projectTotals[$key] = ($projectTotals[$key] ?? 0) + $secs;
                 $total += $secs;
             }
-            if ($daySecs <= 0) {
-                continue; // skip days with no work
+            // Keep every working day that has STARTED (so an under-logged past day surfaces, but a
+            // not-yet-happened future day is hidden), plus any day (incl. weekend) with logged work.
+            if ($daySecs <= 0 && (!$workingDay || !$started)) {
+                continue;
+            }
+            $short = $countable ? max(0, $expected - $daySecs) : 0;
+            if ($countable) {
+                $totalExpected += $expected;
+                $totalShort += $short;
             }
             $projList = array_values($projects);
             usort($projList, $sortGroups);
@@ -541,7 +575,15 @@ final class Tasks
             $days[] = [
                 'date' => $db['date'],
                 'label' => date('D, M j', $db['start']),
+                'weekday' => $weekday,
+                'working_day' => $workingDay,
+                'elapsed' => $elapsed,
+                'in_progress' => $started && !$elapsed, // today, still ongoing — shown but not flagged short
                 'seconds' => $daySecs,
+                'expected_seconds' => $expected,
+                'short_seconds' => $short,
+                // today/future are never "incomplete"; only a fully-elapsed working day can be short.
+                'complete' => !$countable || $daySecs >= $expected,
                 'projects' => $projList,
             ];
         }
@@ -576,6 +618,11 @@ final class Tasks
             'week_end' => date('c', $weekEnd),
             'week_label' => date('M j', $weekStart) . ' – ' . date('M j, Y', $dayBounds[6]['start']),
             'total_seconds' => $total,
+            // Completeness vs the daily target (drives the weekly summary's "did I log a full day?" check).
+            'expected_seconds' => $totalExpected,
+            'short_seconds' => $totalShort,
+            'target_hours' => $targetHours,
+            'weekdays_only' => $weekdaysOnly,
             'project_totals' => $projectTotalsList,
             'days' => $days,
             'completed' => $completed,
@@ -614,6 +661,43 @@ final class Tasks
                 'project' => (string) ($t['project'] ?? ''),
                 'at' => gmdate('c', $doneAt),
                 'worked_seconds' => $this->workedTodaySeconds($t, $now),
+            ];
+        }
+        usort($out, fn ($a, $b) => strcmp($b['at'], $a['at']));
+        return $out;
+    }
+
+    /**
+     * Like completedSince(), but bounded to a [start, end) window and reporting each task's worked
+     * seconds FOR THAT WINDOW (not "today") — so a check-out can be rebuilt for a past day (e.g.
+     * yesterday, when the operator forgot to post). Keeps the latest "-> done" transition inside the
+     * window; most-recently-completed first.
+     *
+     * @return array<int,array{id:string,title:string,project:string,at:string,worked_seconds:int}>
+     */
+    public function completedBetween(int $start, int $end, ?int $now = null): array
+    {
+        $now ??= time();
+        $out = [];
+        foreach ($this->raw() as $t) {
+            $doneAt = false;
+            foreach (($t['history'] ?? []) as $h) {
+                if (($h['status'] ?? '') === 'done') {
+                    $at = strtotime((string) ($h['at'] ?? ''));
+                    if ($at !== false && $at >= $start && $at < $end && ($doneAt === false || $at > $doneAt)) {
+                        $doneAt = $at;
+                    }
+                }
+            }
+            if ($doneAt === false) {
+                continue;
+            }
+            $out[] = [
+                'id' => (string) $t['id'],
+                'title' => (string) $t['title'],
+                'project' => (string) ($t['project'] ?? ''),
+                'at' => gmdate('c', $doneAt),
+                'worked_seconds' => $this->workedInWindow($t, $start, $end, $now),
             ];
         }
         usort($out, fn ($a, $b) => strcmp($b['at'], $a['at']));
@@ -794,6 +878,10 @@ final class Tasks
             'id' => $t['id'],
             'title' => $t['title'],
             'project' => (string) ($t['project'] ?? ''),
+            // label/priority default on read, so tasks created before the feature serialise cleanly
+            // (priority → 'medium', label → '') without needing a migration pass over tasks.json.
+            'label' => (string) ($t['label'] ?? ''),
+            'priority' => $this->normPriority($t['priority'] ?? null),
             'description' => $t['description'] ?? '',
             'status' => $t['status'],
             'created_at' => $t['created_at'] ?? null,
@@ -895,6 +983,25 @@ final class Tasks
         } finally {
             umask($old);
         }
+    }
+
+    /** Coerce any input to one of self::PRIORITIES, defaulting to 'medium'. */
+    private function normPriority(mixed $v): string
+    {
+        $v = is_string($v) ? strtolower(trim($v)) : '';
+        return in_array($v, self::PRIORITIES, true) ? $v : self::DEFAULT_PRIORITY;
+    }
+
+    /**
+     * Normalise a single category label from (untrusted) input: strip control chars, collapse
+     * whitespace, length-cap. Empty is allowed (= no category). Mirrors the title sanitisation so a
+     * label coming via @Claude intake or the API can't carry control chars into the board.
+     */
+    private function normLabel(string $v): string
+    {
+        $v = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $v) ?? '';
+        $v = trim(preg_replace('/\s+/u', ' ', $v) ?? '');
+        return mb_substr($v, 0, self::LABEL_MAX);
     }
 
     private function safeName(string $name): string

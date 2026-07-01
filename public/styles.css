@@ -52,15 +52,16 @@ main, .topbar { position: relative; z-index: 1; }
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 22px clamp(16px, 4vw, 48px);
+  gap: 16px 24px;
+  padding: 15px clamp(16px, 4vw, 48px);
   border-bottom: 1px solid var(--line-soft);
   flex-wrap: wrap;
-  z-index: 30; /* above main so the "More" popover overflows the header on top of the board */
+  z-index: 30; /* above main so popovers can overflow the header on top of the board */
 }
 
-.brand { display: flex; align-items: center; gap: 14px; }
+/* Fixed-width brand keeps the nav at the SAME x on every page (page titles + per-page right-side
+   actions differ in width, so a space-between/centered nav would jump when navigating). */
+.brand { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; min-width: 220px; }
 
 .brand-mark {
   font-family: var(--mono);
@@ -75,62 +76,82 @@ main, .topbar { position: relative; z-index: 1; }
 }
 
 .brand-text h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: -0.2px; }
-.brand-text p { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
-.brand-text code { font-family: var(--mono); color: var(--accent); }
 
-.topbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; position: relative; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; position: relative; margin-left: auto; }
 
-/* ---- topbar action clusters ---- */
-.tb-status { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.tb-status:empty { display: none; }
-.tb-group  { display: flex; align-items: center; gap: 8px; }
-.tb-divider { width: 1px; height: 22px; background: var(--line); flex-shrink: 0; }
-
-/* segmented display-toggle control; margin-left:auto splits passive status (left) from actions (right) */
-.tb-seg {
-  display: flex; align-items: center; gap: 2px; margin-left: auto;
-  padding: 3px; border: 1px solid var(--line); border-radius: 12px;
-  background: rgba(255, 255, 255, 0.02);
+/* ---- Tier 1: a single quiet PASSIVE status capsule (a gauge, never buttons) ---- */
+.tb-status {
+  display: flex; align-items: center; gap: 12px;
+  height: 34px; padding: 0 13px;
+  border: 1px solid var(--line); border-radius: 11px;
+  background: rgba(255, 255, 255, 0.015);
 }
-.btn-seg {
-  border: 1px solid transparent; background: transparent; color: var(--muted);
-  padding: 7px 11px; border-radius: 9px; font-weight: 600;
-}
-.btn-seg:hover { background: var(--panel-2); color: var(--text); }
-.btn-seg.active { background: var(--accent-deep); border-color: var(--accent-deep); color: #06140f; }
+.tb-status > span:empty { display: none; } /* readouts collapse when idle; the capsule stays calm */
+.tb-status:not(:has(> :not(:empty))) { display: none; } /* hide the whole capsule if every readout is empty */
+/* bound the two variable-width readouts so the capsule can't grow Tier 1 into a second row */
+.tb-status .now-timer { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tb-status .today-total { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
 
-.tb-add { flex-shrink: 0; }
-
-/* ---- "More" menu (hand-built popover) ---- */
-.tb-menu-wrap { position: relative; display: inline-flex; }
-.tb-menu-trigger[aria-expanded="true"] { background: var(--panel-2); border-color: #2f3d59; }
-.tb-menu {
-  position: absolute; top: calc(100% + 6px); right: 0;
-  min-width: 210px; padding: 6px; z-index: 40;
-  background: var(--panel-2); border: 1px solid var(--line);
-  border-radius: 12px; box-shadow: var(--shadow);
-  display: flex; flex-direction: column; gap: 2px;
+/* weekly-worked chip — the one metric promoted to always-on. Clickable, but reads as text, not a CTA.
+   --pct drives a subtle progress fill (worked vs the daily-target expectation for the week). */
+.week-meter {
+  --pct: 0%;
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+  color: var(--accent); cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px;
+  background: linear-gradient(90deg, rgba(94, 234, 212, 0.16) var(--pct), transparent var(--pct));
+  transition: border-color 0.15s ease;
 }
-.tb-menu.hidden { display: none; }
-.tb-menu-item {
-  display: block; width: 100%; text-align: left;
-  background: transparent; border: none; color: var(--text);
-  font-family: var(--sans); font-size: 13.5px; font-weight: 500;
-  padding: 9px 12px; border-radius: 8px; cursor: pointer;
-  transition: background 0.12s ease;
+.week-meter:hover { border-color: var(--accent-deep); }
+.week-meter:empty { display: none; }
+.week-meter .wm-exp { color: var(--faint); font-weight: 500; }
+.week-meter.short {
+  color: var(--amber); border-color: rgba(245, 181, 68, 0.35);
+  background: linear-gradient(90deg, rgba(245, 181, 68, 0.16) var(--pct), transparent var(--pct));
 }
-.tb-menu-item:hover { background: var(--panel); }
-.tb-menu-item:focus-visible { outline: none; background: var(--panel); box-shadow: inset 0 0 0 1.5px var(--primary); }
 
-/* ---- topbar responsive: wrap clusters as whole units, primary full-width ---- */
+/* icon-only settings gear (universal glyph → safe without a label) */
+.tb-gear { font-size: 16px; line-height: 1; padding: 7px; }
+
+/* ---- Tier 2: board toolbar (Tasks-only) — view lenses left, daily ritual + primary right ---- */
+.board-toolbar {
+  display: flex; align-items: center; gap: 20px;
+  padding: 0 clamp(16px, 4vw, 48px) 14px; flex-wrap: wrap;
+}
+.bt-views { display: flex; align-items: center; gap: 8px; }
+.bt-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bt-select {
+  height: 38px; box-sizing: border-box; cursor: pointer; color-scheme: dark;
+  background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+  border-radius: 9px; padding: 0 10px; font-size: 13px; font-family: var(--sans); font-weight: 600;
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; /* a long custom category can't stretch the toolbar */
+}
+.bt-select:hover { color: var(--text); border-color: #2f3d59; }
+.bt-select:focus { outline: none; border-color: var(--primary); }
+.bt-select.is-active { color: var(--accent); border-color: var(--accent-deep); box-shadow: inset 0 0 0 1px var(--accent-deep); } /* a live filter reads as "on" */
+.bt-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+.board-toolbar .btn { height: 38px; display: inline-flex; align-items: center; justify-content: center; }
+
+/* Today is labeled; Age/Select are icon-only. Active = soft accent ring, not a loud solid fill. */
+.btn-toggle, .btn-icon-toggle { border: 1px solid var(--line); background: var(--panel); color: var(--muted); font-weight: 600; }
+.btn-toggle { padding: 0 14px; }
+.btn-icon-toggle { width: 38px; padding: 0; font-size: 15px; }
+.btn-toggle:hover, .btn-icon-toggle:hover { color: var(--text); border-color: #2f3d59; background: var(--panel-2); }
+.btn-toggle.active, .btn-icon-toggle.active {
+  color: var(--accent); background: var(--panel-2);
+  border-color: var(--accent-deep); box-shadow: inset 0 0 0 1px var(--accent-deep);
+}
+
+/* ---- header/toolbar responsive ---- */
+@media (max-width: 900px) {
+  .tb-status .now-timer { max-width: 150px; }
+}
 @media (max-width: 760px) {
-  .topbar-actions { width: 100%; gap: 10px; }
-  .tb-divider { display: none; }
-  .tb-status, .tb-group, .tb-seg { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
-  .tb-seg { margin-left: 0; }
-  .tb-menu-wrap { order: 5; }
-  .tb-add { width: 100%; margin-left: 0; order: 6; }
-  .tb-menu { right: auto; left: 0; }
+  .topbar { padding: 13px 16px; }
+  .topbar-actions { gap: 8px; }
+  .board-toolbar { gap: 12px; }
+  .bt-actions { width: 100%; margin-left: 0; }
 }
 
 .lock-pill {
@@ -367,17 +388,20 @@ main { padding: clamp(18px, 3vw, 36px) clamp(16px, 4vw, 48px) 80px; }
 .modal-head h2 { margin: 0; font-size: 17px; }
 .modal-head .icon-btn { font-size: 22px; }
 
-#account-form { padding: 20px 22px 22px; }
+/* All modal forms get inner padding so fields don't run edge-to-edge (was #account-form only). */
+.modal form { padding: 20px 22px 22px; }
 .field { margin-bottom: 15px; display: flex; flex-direction: column; gap: 6px; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .field label { font-size: 12.5px; color: var(--muted); font-weight: 600; }
 .field .opt { color: var(--faint); font-weight: 400; }
-.field input {
+.field input, .field textarea, .field select {
   background: var(--bg); border: 1px solid var(--line);
   border-radius: 10px; padding: 11px 12px; color: var(--text);
   font-size: 14px; font-family: var(--sans);
 }
-.field input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(110,168,255,0.15); }
+.field select { cursor: pointer; color-scheme: dark; }
+.field textarea { resize: vertical; min-height: 88px; line-height: 1.5; } /* was unstyled → rendered white */
+.field input:focus, .field textarea:focus, .field select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(110,168,255,0.15); }
 .field .hint { font-size: 11.5px; color: var(--faint); line-height: 1.45; }
 .field .hint.warn { color: #f5c97a; }
 .check-row {
@@ -601,6 +625,17 @@ main { padding: clamp(18px, 3vw, 36px) clamp(16px, 4vw, 48px) 80px; }
   font-family: var(--mono); font-size: 12px; color: var(--muted); background: var(--bg);
   border: 1px solid var(--line); padding: 1px 8px; border-radius: 999px;
 }
+.col-count-more { color: var(--faint); } /* "+N earlier hidden" — quiet, so hiding reads as focus not loss */
+
+/* Done/Archived time-window fold: reveal/collapse the earlier-than-this-week tail (never deleted) */
+.col-fold {
+  width: 100%; text-align: left; cursor: pointer;
+  background: transparent; border: 1px dashed var(--line); border-radius: 9px;
+  color: var(--muted); font-family: var(--sans); font-size: 12px; font-weight: 500;
+  padding: 8px 11px;
+}
+.col-fold:hover { color: var(--text); border-color: #2f3d59; background: var(--panel-2); }
+.col-fold.is-collapse { border-style: solid; color: var(--faint); }
 .col-add {
   background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
   width: 22px; height: 22px; border-radius: 7px; cursor: pointer; font-size: 16px; line-height: 1;
@@ -658,6 +693,25 @@ main { padding: clamp(18px, 3vw, 36px) clamp(16px, 4vw, 48px) 80px; }
 .task-meta { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .task-meta:not(:has(*:not(:empty))) { display: none; } /* collapse when neither age nor attachments show */
 .task-since { color: var(--faint); } /* age line — quiet; only populated when the toggle is on */
+
+/* category + priority chips (a quiet row under the title; hidden when a card has neither) */
+.task-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px; }
+.task-tags:empty { display: none; }
+.task-label {
+  padding: 1px 8px; font-size: 10.5px; font-weight: 600; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--muted); /* JS sets the per-label hue */
+  max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.task-prio {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 8px; font-size: 10px; font-weight: 700; letter-spacing: .02em;
+  text-transform: uppercase; border-radius: 999px; border: 1px solid transparent;
+}
+.task-prio::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+/* Only high/low render on the board (medium = the quiet default); .prio-medium is defined for safety. */
+.prio-high { color: #fca5a5; background: rgba(248, 113, 113, 0.13); border-color: rgba(248, 113, 113, 0.34); }
+.prio-low { color: var(--faint); background: rgba(91, 102, 128, 0.12); border-color: var(--line); }
+.prio-medium { color: var(--muted); background: var(--panel-2); border-color: var(--line); }
 .task-timer-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .task-worked { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--accent); white-space: nowrap; } /* the figure that matters — never break "1h 0m" */
 .task-today {
@@ -689,7 +743,7 @@ main { padding: clamp(18px, 3vw, 36px) clamp(16px, 4vw, 48px) 80px; }
 .detail-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .detail-field-inline { display: flex; align-items: center; gap: 8px; }
 .inline-label { font-size: 12px; color: var(--muted); font-weight: 600; }
-.detail-status { background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 9px; padding: 7px 9px; font-size: 13px; font-family: var(--sans); }
+.detail-status { background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 9px; padding: 7px 9px; font-size: 13px; font-family: var(--sans); color-scheme: dark; }
 .detail-body textarea {
   width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
   color: var(--text); padding: 10px; font-size: 13.5px; font-family: var(--sans); resize: vertical;
@@ -736,6 +790,25 @@ main { padding: clamp(18px, 3vw, 36px) clamp(16px, 4vw, 48px) 80px; }
 
 /* weekly summary: day -> project -> task breakdown */
 .summary-subnote { font-size: 11px; color: var(--faint); margin: 0 0 4px; }
+.summary-subnote.summary-short { color: #e2b04a; font-weight: 600; font-size: 12px; }
+.summary-subnote.summary-ok { color: var(--green); font-size: 12px; }
+.summary-redmine { font-size: 12.5px; color: var(--muted); margin: 2px 0 8px; }
+.summary-redmine strong { color: var(--accent); font-family: var(--mono); }
+.summary-redmine-warn { color: var(--amber); }
+.summary-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 20px; border-bottom: 1px solid var(--line-soft);
+}
+.summary-target { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.summary-target input {
+  width: 3.4em; background: var(--bg-2); color: var(--text); border: 1px solid var(--line-soft);
+  border-radius: 6px; padding: 3px 6px; font-family: var(--mono); font-size: 12px; text-align: right;
+}
+.sum-day-flag { font-family: var(--mono); font-size: 11px; margin-right: auto; padding-left: 10px; white-space: nowrap; }
+.sum-day-flag.is-ok { color: var(--green); }
+.sum-day-flag.is-short { color: #e2b04a; }
+.sum-day-flag.is-weekend { color: var(--faint); }
+.sum-day-incomplete .sum-day-head { border-bottom-color: #e2b04a55; }
 .sum-row-proj .sum-name { font-weight: 600; color: var(--text); }
 .sum-day { margin: 12px 0 4px; }
 .sum-day-head {
@@ -773,6 +846,13 @@ main { padding: clamp(18px, 3vw, 36px) clamp(16px, 4vw, 48px) 80px; }
 .mm-preview[readonly] { color: var(--muted); }
 #mm-preview-sub { padding: 0 20px; margin: 4px 0 0; }
 #mm-preview-modal .modal-foot { padding: 0 20px 18px; }
+.mm-day-row { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+#mm-day-row, #mm-hours-row { padding: 0 20px; } /* align the day picker + hours toggle with the preview body */
+.mm-day-select {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 8px;
+  padding: 5px 9px; font-size: 13px; font-family: var(--sans); color-scheme: dark; cursor: pointer;
+}
+.mm-day-select:focus { outline: none; border-color: var(--primary); }
 
 /* @Claude intake: toolbar status dot + settings-modal listener line */
 .mm-dot {
@@ -848,7 +928,8 @@ select.we-min { width: auto; min-width: 54px; text-align: left; cursor: pointer;
 .screen-time.warn { color: var(--amber); cursor: pointer; }
 #st-body .st-row { grid-template-columns: minmax(120px, 1.6fr) 1.5fr auto; }
 .st-cat { font-size: 9.5px; color: var(--faint); border: 1px solid var(--line-soft); border-radius: 999px; padding: 0 6px; white-space: nowrap; }
-/* the board-view toggles (#today-view/#age-toggle/#select-mode) are .btn-seg now — .btn-seg.active styles them */
+/* the board-view toggles (#today-view/#age-toggle/#select-mode) live in the board-toolbar as
+   .btn-toggle / .btn-icon-toggle; their .active states are styled there */
 
 .task-card.selectable { position: relative; cursor: pointer; }
 .task-card.selectable .task-head { padding-right: 22px; } /* clear the select checkmark */
@@ -919,4 +1000,76 @@ select.we-min { width: auto; min-width: 54px; text-align: left; cursor: pointer;
   .viewer-frame { height: 60vh; }
   .board { flex-direction: column; }
   .board-col { width: 100%; max-height: none; }
+}
+
+/* ---- projects page ---- */
+.proj-panel {
+  background: linear-gradient(180deg, var(--panel), var(--bg-2));
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 20px 22px; margin-bottom: 22px; box-shadow: var(--shadow); max-width: 1000px;
+}
+.proj-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+.proj-head h2 { margin: 0 0 4px; font-size: 16px; }
+.proj-sub { margin: 0 0 4px; font-size: 12.5px; color: var(--muted); line-height: 1.55; max-width: 78ch; }
+.proj-sub code { font-family: var(--mono); color: var(--accent); font-size: 11.5px; }
+
+.proj-recon {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 11px 0; margin: 8px 0 14px; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft);
+}
+.proj-recon .week-label { font-weight: 600; font-size: 13px; min-width: 92px; text-align: center; }
+.proj-recon-note { font-family: var(--mono); font-size: 11.5px; color: var(--faint); margin-left: 6px; }
+
+.proj-table { display: flex; flex-direction: column; gap: 8px; }
+.proj-row {
+  display: grid; gap: 10px; align-items: center;
+  grid-template-columns: minmax(120px, 1fr) minmax(180px, 1.8fr) minmax(118px, auto) 34px;
+}
+.proj-row-head { padding: 0 2px; }
+.proj-h { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--faint); }
+.proj-name, .proj-url {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 9px; color: var(--text);
+  padding: 9px 11px; font-size: 13px; font-family: var(--sans); min-width: 0;
+}
+.proj-url { font-family: var(--mono); font-size: 12px; }
+.proj-name:focus, .proj-url:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(110,168,255,.15); }
+.proj-del { padding: 6px 9px; }
+.proj-empty { color: var(--faint); font-size: 12.5px; padding: 8px 2px; line-height: 1.5; }
+.proj-table-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+
+.proj-status { font-size: 12px; font-family: var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proj-status.rm-ok { color: var(--green); }
+.proj-status.rm-short { color: var(--amber); font-weight: 600; }
+.proj-status.rm-error { color: var(--red); }
+.proj-status.rm-no_key { color: var(--primary); }
+
+/* per-instance API key rows */
+.key-list { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.key-row { display: grid; gap: 10px; align-items: center; grid-template-columns: minmax(160px, 1.3fr) auto minmax(170px, 1.7fr) auto; }
+.key-host { font-family: var(--mono); font-size: 12.5px; color: var(--text); word-break: break-all; }
+.key-state { font-size: 11.5px; white-space: nowrap; }
+.key-state.set { color: var(--green); }
+.key-state.unset { color: var(--faint); }
+.key-input {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 9px; color: var(--text);
+  padding: 8px 11px; font-size: 13px; font-family: var(--mono); min-width: 0;
+}
+.key-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(110,168,255,.15); }
+
+/* Redmine reconciliation badge in the weekly summary (tasks page) */
+.rm-badge {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+  white-space: nowrap; border: 1px solid; justify-self: end;
+}
+.rm-badge.rm-ok { color: var(--green); border-color: rgba(74,222,128,.35); background: rgba(74,222,128,.10); }
+.rm-badge.rm-short { color: var(--amber); border-color: rgba(245,181,68,.35); background: rgba(245,181,68,.10); }
+.rm-badge.rm-error { color: var(--red); border-color: rgba(248,113,113,.35); background: rgba(248,113,113,.10); }
+
+@media (max-width: 640px) {
+  .proj-row { grid-template-columns: 1fr auto; }
+  .proj-row .proj-url { grid-column: 1 / -1; }
+  .proj-row .proj-status { grid-column: 1 / -1; }
+  .proj-row-head { display: none; }
+  .key-row { grid-template-columns: 1fr auto; }
+  .key-row .key-input { grid-column: 1 / -1; }
 }

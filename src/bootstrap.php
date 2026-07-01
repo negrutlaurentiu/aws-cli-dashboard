@@ -12,9 +12,11 @@ require __DIR__ . '/S3.php';
 require __DIR__ . '/Tasks.php';
 require __DIR__ . '/Intake.php';
 require __DIR__ . '/Mattermost.php';
+require __DIR__ . '/MattermostDigest.php';
 require __DIR__ . '/MattermostSocket.php';
 require __DIR__ . '/ClaudeCli.php';
 require __DIR__ . '/ScreenTime.php';
+require __DIR__ . '/Redmine.php';
 
 /**
  * Shared configuration + security helpers for the dashboard. Everything here assumes a

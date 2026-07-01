@@ -1,0 +1,9 @@
+{
+    "projects": [
+        {
+            "id": "example-project",
+            "name": "Example Project",
+            "redmine_url": "https://redmine.example.com/projects/example-slug"
+        }
+    ]
+}

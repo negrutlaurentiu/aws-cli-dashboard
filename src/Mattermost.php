@@ -81,10 +81,17 @@ final class Mattermost
         return (string) $body['id'];
     }
 
-    /** POST /api/v4/posts — create a message in a channel. Returns the new post id. */
-    public function post(string $channelId, string $message): string
+    /**
+     * POST /api/v4/posts — create a message in a channel. Returns the new post id. Pass $rootId to
+     * make it a threaded reply (the @Claude agent replies in the originating thread).
+     */
+    public function post(string $channelId, string $message, string $rootId = ''): string
     {
-        [$status, $body] = $this->request('POST', '/posts', ['channel_id' => $channelId, 'message' => $message]);
+        $payload = ['channel_id' => $channelId, 'message' => $message];
+        if ($rootId !== '') {
+            $payload['root_id'] = $rootId;
+        }
+        [$status, $body] = $this->request('POST', '/posts', $payload);
         if ($status !== 201 || !is_array($body) || empty($body['id'])) {
             throw new \RuntimeException($this->errMsg($status, $body, 'Failed to post message'));
         }
@@ -125,6 +132,60 @@ final class Mattermost
     }
 
     /**
+     * GET /api/v4/files/{id}/info — metadata for a file attachment.
+     *
+     * @return array<string,mixed> e.g. {name, mime_type, size, extension}
+     */
+    public function getFileInfo(string $fileId): array
+    {
+        [$status, $body] = $this->request('GET', '/files/' . rawurlencode($fileId) . '/info');
+        if ($status !== 200 || !is_array($body)) {
+            throw new \RuntimeException($this->errMsg($status, $body, 'Failed to fetch file info'));
+        }
+        return $body;
+    }
+
+    /**
+     * GET /api/v4/files/{id} — download the raw bytes of a file attachment (not JSON). Same auth +
+     * hardened TLS as request(); used by the attach_file tool to pull a Mattermost attachment so it
+     * can be saved onto a task. Caps the download so a huge file can't exhaust memory.
+     */
+    public function downloadFile(string $fileId, int $maxBytes = 64 * 1024 * 1024): string
+    {
+        if ($this->baseUrl === '' || $this->token === '') {
+            throw new \RuntimeException('Mattermost is not configured.');
+        }
+        $ch = curl_init($this->baseUrl . '/api/v4/files/' . rawurlencode($fileId));
+        if ($ch === false) {
+            throw new \RuntimeException('Failed to initialize the HTTP client.');
+        }
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => $this->timeout,
+            CURLOPT_TIMEOUT => 60,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_HTTPHEADER => ['Authorization: Bearer ' . $this->token],
+            CURLOPT_BUFFERSIZE => 65536,
+            CURLOPT_NOPROGRESS => false,
+            // abort the transfer if it exceeds the cap (defends against an enormous file)
+            CURLOPT_PROGRESSFUNCTION => static function ($ch, $dlTotal, $dlNow) use ($maxBytes): int {
+                return ($dlTotal > $maxBytes || $dlNow > $maxBytes) ? 1 : 0;
+            },
+        ]);
+        $raw = curl_exec($ch);
+        if ($raw === false) {
+            throw new \RuntimeException('Could not download file: ' . curl_error($ch));
+        }
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        if ($status !== 200) {
+            throw new \RuntimeException('Failed to download file (HTTP ' . $status . ').');
+        }
+        return (string) $raw;
+    }
+
+    /**
      * @param array<string,mixed>|null $json request body (null = no body)
      * @return array{0:int,1:mixed} [http status, decoded JSON body or null]
      */
@@ -150,7 +211,6 @@ final class Mattermost
         if ($json !== null) {
             $payload = json_encode($json, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             if ($payload === false) {
-                curl_close($ch);
                 throw new \RuntimeException('Failed to encode the request payload.');
             }
             $opts[CURLOPT_POSTFIELDS] = $payload;
@@ -161,12 +221,9 @@ final class Mattermost
 
         $raw = curl_exec($ch);
         if ($raw === false) {
-            $err = curl_error($ch);
-            curl_close($ch);
-            throw new \RuntimeException('Could not reach Mattermost: ' . $err);
+            throw new \RuntimeException('Could not reach Mattermost: ' . curl_error($ch));
         }
         $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-        curl_close($ch);
 
         return [$status, json_decode((string) $raw, true)];
     }

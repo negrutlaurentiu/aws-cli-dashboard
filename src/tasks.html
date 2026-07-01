@@ -16,55 +16,54 @@
       <span class="brand-mark">aws</span>
       <div class="brand-text">
         <h1>Tasks</h1>
-        <p>board &middot; timers &middot; weekly summary &middot; <code>__HOST__:__PORT__</code></p>
       </div>
     </div>
     <nav class="nav">
       <a href="/" class="nav-link">Credentials</a>
       <a href="/s3" class="nav-link">S3 Browser</a>
       <a href="/tasks" class="nav-link active">Tasks</a>
+      <a href="/projects" class="nav-link">Projects</a>
     </nav>
+    <!-- Tier 1, right: a quiet PASSIVE status capsule (no button chrome) + listener dot + settings gear.
+         Only the week chip and screen-time are clickable; everything else is read-only (tick()/render*). -->
     <div class="topbar-actions">
-      <!-- passive live status (read-only; updated by tick()/renderScreenTime()) -->
       <div class="tb-status" role="group" aria-label="Status">
         <span class="screen-time" id="screen-time" title="macOS Screen Time — computer-active time today"></span>
         <span class="now-timer" id="now-timer" title="Active work timer"></span>
         <span class="today-total" id="today-total" title="Worked today across the highlighted tasks"></span>
+        <button class="week-meter" id="week-meter" title="Worked this week — click for the weekly summary (and past weeks)" aria-label="Worked this week"></button>
       </div>
-
-      <!-- board display toggles (segmented control); .tb-seg pins this and all that follows to the right -->
-      <div class="tb-seg" role="group" aria-label="Board view">
-        <button class="btn btn-seg" id="today-view" title="Highlight only the tasks you worked on (or finished) today — for check-out">&#128198; Today</button>
-        <button class="btn btn-seg" id="age-toggle" title="Show how long ago each task was added">&#128337; Age</button>
-        <button class="btn btn-seg" id="select-mode" title="Select tasks to sum their time vs. your computer time">&#9638; Select</button>
-      </div>
-
-      <span class="tb-divider" aria-hidden="true"></span>
-
-      <!-- mattermost daily ritual (always visible) -->
-      <div class="tb-group" role="group" aria-label="Mattermost">
-        <button class="mm-dot is-off" id="mm-listener-dot" title="@Claude listener" aria-label="@Claude listener status"></button>
-        <button class="btn btn-ghost" id="mm-checkin" title="Post your In Progress &amp; Pending tasks to the check-in channel">&#128229; Check in</button>
-        <button class="btn btn-ghost" id="mm-checkout" title="Post today's finished tasks to the check-out channel">&#128228; Check out</button>
-      </div>
-
-      <span class="tb-divider" aria-hidden="true"></span>
-
-      <!-- secondary actions menu (hand-built popover) -->
-      <div class="tb-menu-wrap">
-        <button class="btn btn-ghost tb-menu-trigger" id="more-menu-trigger"
-                aria-haspopup="menu" aria-expanded="false" aria-controls="more-menu" title="More">&#8943; More</button>
-        <div class="tb-menu hidden" id="more-menu" role="menu" aria-label="More actions">
-          <button class="tb-menu-item" id="open-summary" role="menuitem">&#128197; Weekly summary</button>
-          <button class="tb-menu-item" id="mm-settings" role="menuitem" aria-label="Mattermost settings">&#9881; Mattermost settings</button>
-        </div>
-      </div>
-
-      <button class="btn btn-primary tb-add" id="add-task">+ Add task</button>
+      <button class="mm-dot is-off" id="mm-listener-dot" title="@Claude listener" aria-label="@Claude listener status"></button>
+      <button class="icon-btn tb-gear" id="mm-settings-gear" title="Mattermost settings" aria-label="Mattermost settings">&#9881;</button>
     </div>
   </header>
 
   <main>
+    <!-- Tier 2, board toolbar (Tasks-only): board-view lenses on the left, the daily ritual + primary on the right. -->
+    <div class="board-toolbar">
+      <div class="bt-views" role="group" aria-label="Board view">
+        <button class="btn btn-toggle" id="today-view" title="Highlight only the tasks you worked on (or finished) today — for check-out">&#128198; Today</button>
+        <button class="btn btn-icon-toggle" id="age-toggle" title="Show how long ago each task was added" aria-label="Show how long ago each task was added">&#128337;</button>
+        <button class="btn btn-icon-toggle" id="select-mode" title="Select tasks to sum their time vs. your computer time" aria-label="Select tasks to compare tracked time">&#9638;</button>
+      </div>
+      <div class="bt-filters" role="group" aria-label="Filter and sort">
+        <select class="bt-select" id="filter-label" aria-label="Filter by category" title="Filter by category">
+          <option value="">All categories</option>
+        </select>
+        <select class="bt-select" id="filter-priority" aria-label="Filter by priority" title="Filter by priority">
+          <option value="">Any priority</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+        <button class="btn btn-icon-toggle" id="sort-priority" title="Sort each column by priority (high → low)" aria-label="Sort by priority">&#8645;</button>
+      </div>
+      <div class="bt-actions">
+        <button class="btn btn-ghost" id="mm-checkin" title="Post your In Progress &amp; Pending tasks to the check-in channel">&#128229; Check in</button>
+        <button class="btn btn-ghost" id="mm-checkout" title="Post today's finished tasks to the check-out channel">&#128228; Check out</button>
+        <button class="btn btn-primary" id="add-task">+ Add task</button>
+      </div>
+    </div>
     <section class="board" id="board" aria-live="polite"></section>
   </main>
 
@@ -75,8 +74,18 @@
         <button class="icon-btn" id="add-close" aria-label="Close">&times;</button></div>
       <form id="add-form" autocomplete="off">
         <div class="field"><label>Title</label><input name="title" required placeholder="What needs doing?"></div>
-        <div class="field"><label>Project <span class="opt">optional</span></label>
-          <input name="project" list="task-projects" placeholder="Reperks, Virtuosity, BTK…"></div>
+        <div class="field-row">
+          <div class="field"><label>Project <span class="opt">optional</span></label>
+            <input name="project" list="task-projects" placeholder="Reperks, Virtuosity, BTK…"></div>
+          <div class="field"><label>Category <span class="opt">optional</span></label>
+            <input name="label" list="task-labels" placeholder="AWS Terraform, frontend, research…"></div>
+        </div>
+        <div class="field"><label>Priority</label>
+          <select name="priority">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select></div>
         <div class="field"><label>Description <span class="opt">optional</span></label>
           <textarea name="description" rows="4" placeholder="Details, links, context…"></textarea></div>
         <div class="modal-foot">
@@ -109,6 +118,11 @@
         <button class="btn-mini" id="week-prev">‹ Prev week</button>
         <span class="week-label" id="week-label"></span>
         <button class="btn-mini" id="week-next">Next week ›</button>
+      </div>
+      <div class="summary-actions">
+        <label class="summary-target" title="A weekday under this many hours is flagged as short">Full day
+          <input type="number" id="summary-target" min="0" max="24" step="0.5" inputmode="decimal"> h</label>
+        <button class="btn btn-ghost btn-mini" id="summary-post" title="Post this week's summary to Mattermost (to share with a teammate)">&#128228; Post to Mattermost</button>
       </div>
       <div class="summary-body" id="summary-body"></div>
     </div>
@@ -160,6 +174,13 @@
         <label class="check-row mm-check"><input type="checkbox" name="intake_llm"> Interpret messages with <b>Claude</b> <span class="opt">uses your local <code>claude</code> CLI (the subscription you're logged into &mdash; no API key); infers title, project, description &amp; status, and reads the message you reply to</span></label>
         <p class="hint" id="mm-claude-hint"></p>
 
+        <hr class="mm-sep">
+        <label class="check-row mm-check"><input type="checkbox" name="autoresponder_enabled"> Auto-reply to <b>colleagues</b>' status questions <span class="opt">read-only &mdash; shares task titles only, never hours or screen time</span></label>
+        <span class="hint">When a colleague <b>@-mentions you</b> (or DMs you) with a command, your board auto-replies in the thread. No Claude, no tokens. Commands: <code>status</code> (what you're working on now), <code>tasks</code> (active + queued), <code>help</code>. Bot/system messages are ignored; replies are rate-limited per person. Only titles &amp; status are shared &mdash; never worked hours, screen time, or websites.</span>
+        <div class="field"><label>Weekly-hours allowlist <span class="opt">optional &mdash; usernames who may pull your <b>hours</b> report</span></label>
+          <input name="autoresponder_week_allow" placeholder="e.g. ana.checker, team.lead">
+          <span class="hint">Only these people can trigger <code>week</code> / <code>last week</code> to get your weekly <b>hours</b> report (per day &amp; project). Everyone else is ignored for that command. Leave blank to disable the hours report entirely (the titles-only commands above still work for anyone).</span></div>
+
         <div class="mm-listener-row">
           <span class="mm-listener" id="mm-listener-line"></span>
           <button type="button" class="btn-mini" id="mm-listener-restart">Restart listener</button>
@@ -179,6 +200,13 @@
       <div class="modal-head"><h2 id="mm-preview-title">Preview</h2>
         <button class="icon-btn" id="mm-preview-close" aria-label="Close">&times;</button></div>
       <p class="detail-dim" id="mm-preview-sub"></p>
+      <div class="mm-day-row hidden" id="mm-day-row">
+        <label for="mm-day">Check out for</label>
+        <select id="mm-day" class="mm-day-select">
+          <option value="0">Today</option>
+          <option value="-1">Yesterday</option>
+        </select>
+      </div>
       <label class="check-row mm-check hidden" id="mm-hours-row"><input type="checkbox" id="mm-include-hours"> Include worked hours (per-task times &amp; total)</label>
       <textarea class="mm-preview" id="mm-preview-body" spellcheck="false" aria-label="Message to post"></textarea>
       <div class="modal-foot">
@@ -217,6 +245,7 @@
   </div>
 
   <datalist id="task-projects"></datalist>
+  <datalist id="task-labels"></datalist>
 
   <div id="toasts" class="toasts" aria-live="assertive"></div>
 
@@ -243,6 +272,7 @@
         <span class="task-project hidden"></span>
         <h4 class="task-title"></h4>
       </div>
+      <div class="task-tags"></div>
       <div class="task-meta">
         <span class="task-since"></span>
         <span class="task-attach"></span>

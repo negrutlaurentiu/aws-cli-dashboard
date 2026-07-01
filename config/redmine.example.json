@@ -1,0 +1,7 @@
+{
+    "instances": {
+        "redmine.example.com": {
+            "api_key": "REDACTED_REDMINE_API_KEY"
+        }
+    }
+}

@@ -52,6 +52,10 @@ backfill and no dedup bookkeeping.
 
 ## Run / test it
 
+> **Setting up from a fresh clone?** Read [`docs/claude-setup.md`](docs/claude-setup.md) first — it is
+> the localhost setup runbook (prerequisites, the gitignored config files you must create from the
+> `*.example.json` templates, optional Mattermost/Redmine features, and how to verify).
+
 ```bash
 ./start.sh            # http://127.0.0.1:8010  (binds 127.0.0.1 ONLY)
 ```

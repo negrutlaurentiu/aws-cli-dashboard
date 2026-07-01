@@ -28,3 +28,18 @@ credentials.bak
 /config/mm-listen.pid
 /config/mm-listen.status
 /config/mm-listen.log
+
+# launchd auto-start agent log (start.sh stdout/stderr under the LaunchAgent) — local only
+/config/launchd.log
+
+# Managed projects + per-instance Redmine API keys — local only (the keys are secrets)
+/config/projects.json
+/config/redmine.json
+
+# Any other local run logs (manual-start.log, dev server output, …) — local only, may leak
+# local paths/timing; never commit. (Subsumes the explicit mm-listen/launchd log lines above.)
+/config/*.log
+
+# Backup archives can bundle the gitignored secrets (accounts.json, tokens, task data) — a full
+# project zip has leaked creds before, so refuse them wholesale. Never commit.
+*.zip

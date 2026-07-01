@@ -1,0 +1,17 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+namespace AwsDash;
+
+/**
+ * Entry point for the dashboard MCP server (stdio JSON-RPC) used by the @Claude intake agent.
+ * Spawned by the local `claude` CLI via the listener's --mcp-config; per-request Mattermost context
+ * arrives in the environment (DASH_MM_*). All logic lives in src/DashboardMcp.php.
+ */
+
+require __DIR__ . '/../src/bootstrap.php';
+require __DIR__ . '/../src/DashboardMcp.php';
+
+(new DashboardMcp(new App()))->run();

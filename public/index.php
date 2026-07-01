@@ -121,7 +121,13 @@ try {
 
         case $method === 'GET' && $path === '/api/tasks/summary':
             $off = (int) ($_GET['week'] ?? 0);
-            $app->json(['ok' => true, 'summary' => $app->tasks->weekSummary(time() + $off * 7 * 86400)]);
+            $set = $app->store->settings();
+            $app->json(['ok' => true, 'summary' => $app->tasks->weekSummary(
+                time() + $off * 7 * 86400,
+                null,
+                (float) $set['daily_target_hours'],
+                (bool) $set['target_weekdays_only']
+            )]);
             break;
 
         case $method === 'GET' && $path === '/api/screentime':
@@ -135,7 +141,9 @@ try {
                 (string) ($tb['title'] ?? ''),
                 (string) ($tb['description'] ?? ''),
                 (string) ($tb['status'] ?? 'pending'),
-                (string) ($tb['project'] ?? '')
+                (string) ($tb['project'] ?? ''),
+                (string) ($tb['label'] ?? ''),
+                (string) ($tb['priority'] ?? 'medium')
             )]);
             break;
 
@@ -268,6 +276,11 @@ try {
             mattermostPost($app, 'checkout');
             break;
 
+        case $method === 'POST' && $path === '/api/mattermost/weekly':
+            $app->assertCsrf();
+            mattermostWeekly($app);
+            break;
+
         // @Claude intake listener (bin/mm-listen) — health + manual (re)start/stop.
         case $method === 'GET' && $path === '/api/mattermost/listener':
             $app->json(['ok' => true, 'listener' => mattermostListenerView($app)]);
@@ -281,6 +294,35 @@ try {
         case $method === 'POST' && $path === '/api/mattermost/listener/stop':
             $app->assertCsrf();
             mattermostListenerStop($app);
+            break;
+
+        // ---- projects + Redmine reconciliation ----
+        case $method === 'GET' && $path === '/projects':
+            renderProjects($app);
+            break;
+
+        case $method === 'GET' && $path === '/api/projects':
+            $app->json(['ok' => true] + projectsView($app));
+            break;
+
+        case $method === 'POST' && $path === '/api/projects':
+            $app->assertCsrf();
+            $app->store->saveProjects($app->jsonBody());
+            $app->json(['ok' => true] + projectsView($app));
+            break;
+
+        case $method === 'POST' && $path === '/api/redmine/keys':
+            $app->assertCsrf();
+            $rb = $app->jsonBody();
+            $app->store->saveRedmineKeys(
+                is_array($rb['keys'] ?? null) ? $rb['keys'] : [],
+                is_array($rb['clear'] ?? null) ? $rb['clear'] : []
+            );
+            $app->json(['ok' => true] + projectsView($app));
+            break;
+
+        case $method === 'GET' && $path === '/api/projects/redmine-status':
+            redmineStatus($app);
             break;
 
         default:
@@ -504,6 +546,11 @@ function renderS3(App $app): never
 function renderTasks(App $app): never
 {
     renderTemplate($app, 'tasks.html', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src 'self'; object-src 'self'");
+}
+
+function renderProjects(App $app): never
+{
+    renderTemplate($app, 'projects.html', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:");
 }
 
 function renderTemplate(App $app, string $file, string $csp): never
@@ -817,6 +864,10 @@ function mattermostSettingsView(App $app): array
         'intake_llm' => $m['intake_llm'],
         'claude_available' => (new ClaudeCli())->isAvailable(),
         'claude_bin' => (new ClaudeCli())->bin(),
+        // Read-only colleague auto-responder (status replies; titles only).
+        'autoresponder_enabled' => $m['autoresponder_enabled'],
+        // Allowlist (usernames) for the weekly-HOURS command, joined for the text input.
+        'autoresponder_week_allow' => implode(', ', $m['autoresponder_week_allow']),
     ];
 }
 
@@ -837,6 +888,7 @@ function mattermostListenerView(App $app): array
         'error' => $st['error'],
         'intake_enabled' => $m['intake_enabled'],
         'intake_tag' => $m['intake_tag'],
+        'autoresponder_enabled' => $m['autoresponder_enabled'],
         'configured' => $m['base_url'] !== '' && $m['token'] !== '',
     ];
 }
@@ -915,6 +967,10 @@ function mattermostPost(App $app, string $which): void
         ? (bool) $body['include_hours']
         : $m['checkout_show_hours'];
 
+    // Which day's check-out: 0 = today, -1 = yesterday (for when a check-out was missed). Check-out
+    // only; clamped to the last fortnight. Check-in is always "now", so it ignores this.
+    $dayOffset = $which === 'checkout' ? max(-14, min(0, (int) ($body['day_offset'] ?? 0))) : 0;
+
     // Preview: return the freshly-composed digest WITHOUT posting, so the operator reviews (and
     // can edit) it first. This is the only path that runs for a preview request.
     if (!empty($body['preview'])) {
@@ -922,8 +978,9 @@ function mattermostPost(App $app, string $which): void
             'ok' => true,
             'preview' => true,
             'channel' => $channelName,
-            'message' => $which === 'checkin' ? buildCheckinMessage($app) : buildCheckoutMessage($app, $includeHours),
+            'message' => $which === 'checkin' ? MattermostDigest::checkin($app->tasks) : MattermostDigest::checkout($app->tasks, $includeHours, $dayOffset),
             'include_hours' => $which === 'checkout' ? $includeHours : null,
+            'day_offset' => $which === 'checkout' ? $dayOffset : null,
             'configured' => (new Mattermost($m))->isConfigured(),
         ]);
     }
@@ -933,7 +990,7 @@ function mattermostPost(App $app, string $which): void
     // as-is — only length is bounded (Mattermost rejects oversized posts anyway).
     $message = isset($body['message']) && is_string($body['message']) && trim($body['message']) !== ''
         ? trim($body['message'])
-        : ($which === 'checkin' ? buildCheckinMessage($app) : buildCheckoutMessage($app, $includeHours));
+        : ($which === 'checkin' ? MattermostDigest::checkin($app->tasks) : MattermostDigest::checkout($app->tasks, $includeHours, $dayOffset));
     if ($message === '') {
         $app->fail(400, 'Nothing to post.');
     }
@@ -960,163 +1017,182 @@ function mattermostPost(App $app, string $which): void
     $app->json(['ok' => true, 'posted' => true, 'channel' => $channelName, 'post_id' => $postId]);
 }
 
-/** Check-in digest: In Progress and Pending as two separate sections (the operator's choice). */
-function buildCheckinMessage(App $app): string
-{
-    $tasks = $app->tasks->all();
-    $inProgress = array_values(array_filter($tasks, static fn ($t) => ($t['status'] ?? '') === 'in_progress'));
-    $pending = array_values(array_filter($tasks, static fn ($t) => ($t['status'] ?? '') === 'pending'));
-
-    // Check-in is just what's on my plate — no worked-time here (times live on the check-out).
-    $lines = ['**:inbox_tray: Check-in — ' . date('D, M j') . '**', ''];
-    $lines[] = '**In Progress**';
-    foreach (mmTaskLines($inProgress) as $l) {
-        $lines[] = $l;
-    }
-    $lines[] = '';
-    $lines[] = '**Pending**';
-    foreach (mmTaskLines($pending) as $l) {
-        $lines[] = $l;
-    }
-    return implode("\n", $lines);
-}
-
 /**
- * Check-out digest: a "Done today" section (tasks moved to Done since local midnight) and a "Still
- * in progress" section (whatever's currently in_progress). Both are grouped by project and carry
- * each task's TODAY worked-time; a single "Total worked today" sums the hours across both sections.
- * When $includeHours is false, every per-task time tag and the total are omitted (the operator's
- * per-checkout toggle). macOS computer-active time is intentionally not posted here.
+ * Preview/post the WEEKLY SUMMARY digest (hours vs the daily target, by day & project — for a teammate
+ * reconciling against Redmine). Defaults to LAST week. Posts to the check-in channel (same destination
+ * as the daily status). Preview returns the text without posting so the operator can review/edit/copy.
  */
-function buildCheckoutMessage(App $app, bool $includeHours): string
+function mattermostWeekly(App $app): void
 {
-    $since = strtotime('today'); // local midnight today
-    $done = $app->tasks->completedSince($since !== false ? $since : (time() - 86400));
-    $inProgress = array_values(array_filter(
-        $app->tasks->all(),
-        static fn ($t) => ($t['status'] ?? '') === 'in_progress'
-    ));
+    $m = $app->store->mattermost();
+    $set = $app->store->settings();
+    $body = $app->jsonBody();
+    $off = (int) ($body['week_offset'] ?? -1); // default: last completed week
 
-    $lines = ['**:white_check_mark: Check-out — ' . date('D, M j') . '**', ''];
-    $grandTotal = 0;
+    $summary = $app->tasks->weekSummary(
+        time() + $off * 7 * 86400,
+        null,
+        (float) $set['daily_target_hours'],
+        (bool) $set['target_weekdays_only']
+    );
 
-    // ---- Done today ---- (completedSince() carries each task's TODAY hours as 'worked_seconds')
-    $lines[] = '**Done today**';
-    if (!$done) {
-        $lines[] = '_No tasks completed today._';
-    } else {
-        [$sectionLines, $sectionTotal] = mmCheckoutSection($done, 'worked_seconds', $includeHours);
-        array_push($lines, ...$sectionLines);
-        $grandTotal += $sectionTotal;
+    if (!empty($body['preview'])) {
+        $app->json([
+            'ok' => true,
+            'preview' => true,
+            'channel' => $m['checkin_channel'],
+            'message' => MattermostDigest::weekly($summary),
+            'configured' => (new Mattermost($m))->isConfigured(),
+        ]);
     }
 
-    // ---- Still in progress ---- (serialize() exposes each task's TODAY hours as 'today_seconds')
-    $lines[] = '';
-    $lines[] = '**Still in progress**';
-    if (!$inProgress) {
-        $lines[] = '_Nothing in progress._';
-    } else {
-        [$sectionLines, $sectionTotal] = mmCheckoutSection($inProgress, 'today_seconds', $includeHours);
-        array_push($lines, ...$sectionLines);
-        $grandTotal += $sectionTotal;
+    // Send the operator-reviewed text (they may have edited it), else (re)build it.
+    $message = isset($body['message']) && is_string($body['message']) && trim($body['message']) !== ''
+        ? trim($body['message'])
+        : MattermostDigest::weekly($summary);
+    if ($message === '') {
+        $app->fail(400, 'Nothing to post.');
     }
-
-    // ---- Grand total across everything worked today (done + in-progress) ----
-    if ($includeHours) {
-        $lines[] = '';
-        $lines[] = '**Total worked today: ' . fmtDur($grandTotal) . '**';
+    if (mb_strlen($message) > 16383) {
+        $app->fail(400, 'Message is too long to post (16,383 character limit).');
     }
-
-    return implode("\n", $lines);
+    $mm = new Mattermost($m);
+    if (!$mm->isConfigured()) {
+        $app->fail(400, 'Mattermost is not configured — open settings and add your token.');
+    }
+    $channelName = $m['checkin_channel'];
+    $channelId = $m['checkin_channel_id'];
+    if ($channelId === '') {
+        $channelId = $mm->resolveChannelId($m['team'], $channelName);
+        $app->store->saveMattermostChannelIds($channelId, $m['checkout_channel_id']);
+    }
+    $postId = $mm->post($channelId, $message);
+    $app->json(['ok' => true, 'posted' => true, 'channel' => $channelName, 'post_id' => $postId]);
 }
 
+// ---- projects + Redmine reconciliation -------------------------------------
+
 /**
- * Render one check-out section: tasks grouped by project (a `**Project**` sub-header per group;
- * no-project tasks fall under "Other", sorted last), each a bullet that carries its TODAY worked
- * time (from $secondsKey) when $includeHours is on and the task logged time today. Returns the
- * rendered lines (no leading/trailing blank) and the summed seconds, so the caller can fold each
- * section's total into one grand total.
+ * Secret-free view of the project registry + Redmine instances for the browser. Returns the
+ * projects (name + Redmine URL + derived host/identifier) and, per Redmine host referenced by a
+ * project (or already holding a key), only whether a key is stored — NEVER the key itself.
  *
- * @param array<int,array<string,mixed>> $tasks
- * @return array{0:array<int,string>,1:int} [lines, total seconds]
+ * @return array{projects:array<int,array<string,mixed>>,instances:array<int,array{host:string,has_key:bool}>}
  */
-function mmCheckoutSection(array $tasks, string $secondsKey, bool $includeHours): array
+function projectsView(App $app): array
 {
-    $groups = [];
-    foreach ($tasks as $t) {
-        $proj = trim((string) ($t['project'] ?? ''));
-        $groups[$proj !== '' ? $proj : 'Other'][] = $t;
+    $instances = $app->store->redmineInstances();
+    $hosts = [];
+    $views = [];
+    foreach ($app->store->projects() as $p) {
+        $host = $p['redmine']['host'] ?? '';
+        if ($host !== '') {
+            $hosts[$host] = true;
+        }
+        $views[] = [
+            'id' => $p['id'],
+            'name' => $p['name'],
+            'redmine_url' => $p['redmine_url'],
+            'redmine_host' => $host,
+            'redmine_identifier' => $p['redmine']['identifier'] ?? '',
+        ];
     }
-    uksort($groups, static function (string $a, string $b): int {
-        if ($a === 'Other') {
-            return 1;
-        }
-        if ($b === 'Other') {
-            return -1;
-        }
-        return strcasecmp($a, $b);
-    });
+    // Surface every host a project points at, plus any host that already has a stored key.
+    foreach (array_keys($instances) as $h) {
+        $hosts[$h] = true;
+    }
+    $instanceViews = [];
+    foreach (array_keys($hosts) as $h) {
+        $instanceViews[] = ['host' => $h, 'has_key' => isset($instances[$h])];
+    }
+    return ['projects' => $views, 'instances' => $instanceViews];
+}
 
-    $lines = [];
-    $total = 0;
-    foreach ($groups as $proj => $items) {
-        $lines[] = '**' . mmText($proj) . '**';
-        foreach ($items as $t) {
-            $secs = (int) ($t[$secondsKey] ?? 0);
-            $total += $secs;
-            $line = '- ' . mmText((string) ($t['title'] ?? ''));
-            if ($includeHours && $secs > 0) {
-                $line .= ' _(:hourglass_flowing_sand: ' . fmtDur($secs) . ')_';
+/**
+ * Reconcile dashboard-tracked hours against Redmine-logged hours for a week (default LAST week, the
+ * one the operator files in Redmine). Per project: ✅ when the hours YOU logged in Redmine for that
+ * Mon–Sun window are ≥ the hours the dashboard tracked. Read-only; the API key is read server-side
+ * and only ever sent to its own host (Redmine client: TLS-verified, no redirects).
+ */
+function redmineStatus(App $app): void
+{
+    $off = (int) ($_GET['week'] ?? -1); // default: last completed week
+    $off = max(-520, min(520, $off));   // clamp to ±10y so an absurd ?week can't skew strtotime
+    $set = $app->store->settings();
+    $summary = $app->tasks->weekSummary(
+        time() + $off * 7 * 86400,
+        null,
+        (float) $set['daily_target_hours'],
+        (bool) $set['target_weekdays_only']
+    );
+
+    // Dashboard hours per project NAME for this week (project_totals seconds → hours).
+    $dash = [];
+    foreach ($summary['project_totals'] as $pt) {
+        $dash[(string) $pt['project']] = ((int) $pt['seconds']) / 3600;
+    }
+    // Inclusive Redmine date window: Monday .. Sunday of the summarised week.
+    $from = substr((string) $summary['week_start'], 0, 10);
+    $to = date('Y-m-d', strtotime((string) $summary['week_end']) - 1);
+
+    $instances = $app->store->redmineInstances();
+    $userIds = [];  // host => int|false, resolved once per host (false = lookup failed; don't retry)
+    $userErr = [];  // host => the resolve error message, reused for every project on that host
+    $rows = [];
+    foreach ($app->store->projects() as $p) {
+        $name = $p['name'];
+        $dashHours = round($dash[$name] ?? 0.0, 2);
+        $row = [
+            'id' => $p['id'],
+            'name' => $name,
+            'redmine_url' => $p['redmine_url'],
+            'dashboard_hours' => $dashHours,
+        ];
+        $ref = $p['redmine'];
+        if ($ref === null) {
+            $row['status'] = 'no_url';
+        } elseif (($instances[$ref['host']]['api_key'] ?? '') === '') {
+            $row['status'] = 'no_key';
+            $row['host'] = $ref['host'];
+        } elseif ($dashHours <= 0) {
+            $row['status'] = 'none'; // nothing tracked this week → nothing to reconcile
+        } else {
+            $client = new Redmine($ref['base_url'], $instances[$ref['host']]['api_key']);
+            // Resolve the user once per host, caching the FAILURE too (false) so a bad key / down host
+            // isn't re-probed (a full timeout) for every project that points at it.
+            if (!array_key_exists($ref['host'], $userIds)) {
+                try {
+                    $userIds[$ref['host']] = $client->currentUserId();
+                } catch (\Throwable $e) {
+                    $userIds[$ref['host']] = false;
+                    $userErr[$ref['host']] = $e->getMessage();
+                }
             }
-            $lines[] = $line;
+            if ($userIds[$ref['host']] === false) {
+                $row['status'] = 'error';
+                $row['error'] = $userErr[$ref['host']] ?? 'Could not identify the Redmine user for this key.';
+            } else {
+                try {
+                    $logged = round($client->loggedHours($ref['identifier'], $userIds[$ref['host']], $from, $to), 2);
+                    $row['redmine_hours'] = $logged;
+                    // Small epsilon so e.g. 8.00 vs 7.999 rounding doesn't read as short.
+                    $row['status'] = ($logged + 0.001 >= $dashHours) ? 'ok' : 'short';
+                    $row['short_hours'] = max(0.0, round($dashHours - $logged, 2));
+                } catch (\Throwable $e) {
+                    $row['status'] = 'error';
+                    $row['error'] = $e->getMessage();
+                }
+            }
         }
-        $lines[] = ''; // blank between project groups
+        $rows[] = $row;
     }
-    array_pop($lines); // drop the trailing blank — the caller owns spacing between sections
 
-    return [$lines, $total];
-}
-
-/**
- * @param array<int,array<string,mixed>> $tasks
- * @return array<int,string>
- */
-function mmTaskLines(array $tasks): array
-{
-    if (!$tasks) {
-        return ['_none_'];
-    }
-    $out = [];
-    foreach ($tasks as $t) {
-        $proj = trim((string) ($t['project'] ?? ''));
-        $prefix = $proj !== '' ? '`' . mmText($proj) . '` ' : '';
-        $out[] = '- ' . $prefix . mmText((string) ($t['title'] ?? ''));
-    }
-    return $out;
-}
-
-/**
- * Neutralize a task title for a Markdown channel message: collapse newlines/whitespace to a
- * single line, and defuse channel-wide mentions (@channel/@here/@all) with a zero-width space so
- * a title can never mass-ping the channel. (Titles are operator-entered, so this is belt-and-braces.)
- */
-function mmText(string $s): string
-{
-    $s = preg_replace('/\s+/u', ' ', trim($s)) ?? '';
-    $zwsp = "\xE2\x80\x8B"; // U+200B — invisible, but breaks the @mention token
-    return preg_replace('/@(channel|here|all)\b/i', '@' . $zwsp . '$1', $s) ?? $s;
-}
-
-function fmtDur(int $s): string
-{
-    $s = max(0, $s);
-    $h = intdiv($s, 3600);
-    $m = intdiv($s % 3600, 60);
-    if ($h > 0) {
-        return $h . 'h ' . $m . 'm';
-    }
-    if ($m > 0) {
-        return $m . 'm';
-    }
-    return $s . 's';
+    $app->json([
+        'ok' => true,
+        'week_label' => $summary['week_label'],
+        'week_offset' => $off,
+        'from' => $from,
+        'to' => $to,
+        'projects' => $rows,
+    ]);
 }

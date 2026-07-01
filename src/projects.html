@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="__APP_TOKEN__">
+  <title>Projects · AWS CLI Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%81%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css?v=__ASSET_VER__">
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">aws</span>
+      <div class="brand-text">
+        <h1>Projects</h1>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/" class="nav-link">Credentials</a>
+      <a href="/s3" class="nav-link">S3 Browser</a>
+      <a href="/tasks" class="nav-link">Tasks</a>
+      <a href="/projects" class="nav-link active">Projects</a>
+    </nav>
+    <div class="topbar-actions"></div>
+  </header>
+
+  <main>
+    <!-- Projects + reconciliation -->
+    <section class="proj-panel">
+      <div class="proj-head">
+        <div>
+          <h2>Projects &amp; Redmine</h2>
+          <p class="proj-sub">Map each board project to its Redmine project. The <b>name</b> must match what you tag tasks with (e.g. <code>BTK</code> → <code>behind-the-knife</code>). Then check whether last week's logged hours cover what the dashboard tracked.</p>
+        </div>
+      </div>
+
+      <div class="proj-recon">
+        <button class="btn-mini" id="recon-prev" title="Earlier week">‹</button>
+        <span class="week-label" id="recon-label">last week</span>
+        <button class="btn-mini" id="recon-next" title="Later week">›</button>
+        <button class="btn btn-primary btn-mini" id="recon-run" title="Fetch your logged hours from Redmine for this week">&#10227; Check Redmine hours</button>
+        <span class="proj-recon-note" id="recon-note"></span>
+      </div>
+
+      <div class="proj-table" id="proj-table" aria-live="polite"></div>
+
+      <div class="proj-table-actions">
+        <button class="btn-mini" id="proj-add">+ Add project</button>
+        <button class="btn btn-primary" id="proj-save">Save projects</button>
+      </div>
+    </section>
+
+    <!-- Per-instance API keys -->
+    <section class="proj-panel">
+      <div class="proj-head"><h2>Redmine API keys</h2></div>
+      <p class="proj-sub">One key per Redmine instance, shared by its projects. Stored locally (<code>0600</code>), never shown again or sent back to the browser. Get yours from Redmine → <b>My account</b> → <b>API access key</b>. Instances appear here once a project points at them (Save projects first).</p>
+      <div class="key-list" id="key-list" aria-live="polite"></div>
+      <div class="proj-table-actions">
+        <button class="btn btn-primary" id="keys-save">Save keys</button>
+      </div>
+    </section>
+  </main>
+
+  <datalist id="redmine-hosts"></datalist>
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+
+  <script src="/projects.js?v=__ASSET_VER__" defer></script>
+</body>
+</html>

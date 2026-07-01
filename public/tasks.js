@@ -26,6 +26,17 @@ function applyProjectColor(el, name) {
   el.style.background = c.bg;
   el.style.borderColor = c.border;
 }
+// A category label reuses the same deterministic hashing (same name → same hue everywhere), so a
+// label's colour is stable across the board without storing it.
+function applyLabelColor(el, name) { applyProjectColor(el, name); }
+
+// All categories offered in the pickers/filter: the starter seeds plus any label already in use,
+// de-duped and sorted (case-insensitive). This is how a freshly typed label becomes reusable.
+function knownLabels() {
+  const used = state.tasks.map((t) => (t.label || "").trim()).filter(Boolean);
+  return [...new Set([...LABEL_SEEDS, ...used])]
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
 
 const STATUSES = [
   { key: "pending", name: "Pending" },
@@ -35,6 +46,19 @@ const STATUSES = [
   { key: "archived", name: "Archived" },
 ];
 const STATUS_NAME = Object.fromEntries(STATUSES.map((s) => [s.key, s.name]));
+
+// Priority: low / medium / high (default medium). On a card we flag only HIGH (red) and LOW (muted)
+// — medium is the implicit default, so showing nothing for it keeps the board calm. The editor and
+// the filter always cover all three.
+const PRIORITIES = [
+  { key: "high", name: "High" },
+  { key: "medium", name: "Medium" },
+  { key: "low", name: "Low" },
+];
+const PRIORITY_NAME = Object.fromEntries(PRIORITIES.map((p) => [p.key, p.name]));
+const PRIORITY_RANK = { high: 0, medium: 1, low: 2 }; // sort order, high first
+// Starter categories — merged with whatever labels tasks already use, so a typed-once label sticks.
+const LABEL_SEEDS = ["AWS Terraform", "backend", "frontend", "research"];
 
 const state = {
   tasks: [],
@@ -49,6 +73,15 @@ const state = {
   selected: new Set(), // selected task ids while in select mode
   todayView: localStorage.getItem("tasks.todayView") === "1", // dim all but today's work (check-out)
   showAge: localStorage.getItem("tasks.showAge") === "1",      // show "added Nd ago" age line on cards
+  registeredProjects: [], // names from the /projects registry, merged into the project datalist
+  // Done/Archived columns show only THIS WEEK by default; these reveal the earlier tail. Persisted
+  // (like todayView/showAge) so the choice survives the 30s re-sync rebuild and every drag.
+  showDoneOlder: localStorage.getItem("tasks.showDoneOlder") === "1",
+  showArchivedOlder: localStorage.getItem("tasks.showArchivedOlder") === "1",
+  week: null, // cached weekly summary {worked, expected, short, fetchedAt} for the topbar chip
+  filterLabel: "",    // board filter: only this category ("" = all). In-memory, resets on reload.
+  filterPriority: "", // board filter: only this priority ("" = all). In-memory, resets on reload.
+  sortByPriority: localStorage.getItem("tasks.sortByPriority") === "1", // order each column high→low
 };
 
 let dragHandled = false; // a card drag ended on a valid column (vs dropped nowhere → restore DOM)
@@ -86,8 +119,14 @@ async function loadTasks() {
     const data = await apiGet("/api/tasks");
     state.tasks = data.tasks || [];
     state.loadedAt = Date.now();
-    renderBoard();
+    // Sync the project/category controls BEFORE rendering. refreshLabelControls() may normalize a
+    // now-orphaned category filter (its only task was deleted/relabeled) back to "All"; renderBoard()
+    // must then filter with the corrected value — otherwise it draws an empty board against a stale
+    // filter that the control simultaneously reset. Both only read state.tasks, already set above.
     updateProjectDatalist();
+    refreshLabelControls();
+    renderBoard();
+    loadWeekMeter(); // refresh the topbar week chip at the same post-mutation points (fire-and-forget)
     if (state.detailId) {
       const t = state.tasks.find((x) => x.id === state.detailId);
       if (t) renderDetail(t); else closeDetail();
@@ -110,10 +149,40 @@ function renderBoard() {
     col.dataset.status = st.key;
     col.classList.add("col-" + st.key);
     $(".col-name", col).textContent = st.name;
-    const items = state.tasks.filter((t) => t.status === st.key);
-    $(".col-count", col).textContent = items.length;
+    const allItems = applyFilters(state.tasks.filter((t) => t.status === st.key));
     const list = $(".col-list", col);
-    items.forEach((t) => list.appendChild(buildCard(t)));
+
+    // Done & Archived accumulate forever, so by default show only what entered the column THIS WEEK;
+    // the earlier tail folds behind a reveal row (kept in storage, never deleted). Other columns are
+    // active work and always render in full.
+    let shownCount = allItems.length, hiddenCount = 0;
+    if (st.key === "done" || st.key === "archived") {
+      const ws = weekStart();
+      const recent = [], older = [];
+      allItems.forEach((t) => (enteredAt(t) >= ws ? recent : older).push(t));
+      const showOlder = st.key === "done" ? state.showDoneOlder : state.showArchivedOlder;
+      const shown = showOlder ? allItems : recent;
+      shownCount = shown.length;
+      hiddenCount = showOlder ? 0 : older.length;
+      orderForColumn(shown).forEach((t) => list.appendChild(buildCard(t)));
+      const fold = buildFoldRow(st.key, recent.length, older.length, showOlder);
+      if (fold) list.appendChild(fold);
+    } else {
+      orderForColumn(allItems).forEach((t) => list.appendChild(buildCard(t)));
+    }
+
+    // Honest count: visible total, plus a faint "+N" when this week hides an earlier tail.
+    const countEl = $(".col-count", col);
+    countEl.replaceChildren(document.createTextNode(String(shownCount)));
+    if (hiddenCount > 0) {
+      const more = document.createElement("span");
+      more.className = "col-count-more";
+      more.textContent = " +" + hiddenCount;
+      countEl.appendChild(more);
+      countEl.title = "this week shown · " + hiddenCount + " earlier hidden";
+    } else {
+      countEl.removeAttribute("title");
+    }
 
     // inline quick-add composer (per column)
     const compose = $(".col-compose", col);
@@ -153,8 +222,11 @@ function renderBoard() {
       ev.dataTransfer.dropEffect = "move";
       col.classList.add("drag-over");
       const after = dragAfterElement(list, ev.clientY);
-      if (after == null) list.appendChild(dragging);
-      else if (after !== dragging) list.insertBefore(dragging, after);
+      if (after == null) {
+        // keep the live placeholder above a Done/Archived "+N earlier" reveal row, never below it
+        const fold = list.querySelector(".col-fold");
+        if (fold) list.insertBefore(dragging, fold); else list.appendChild(dragging);
+      } else if (after !== dragging) list.insertBefore(dragging, after);
     });
     col.addEventListener("dragleave", (ev) => {
       if (!col.contains(ev.relatedTarget)) col.classList.remove("drag-over");
@@ -165,6 +237,12 @@ function renderBoard() {
       ev.preventDefault();
       col.classList.remove("drag-over");
       dragHandled = true;
+      // With the priority-sort lens on, a column's order is DERIVED from priority, so a same-column
+      // drag is a visual no-op — persisting it would silently reshuffle stored order (only revealed
+      // when the lens is later turned off). Skip it and just re-sync. A cross-column drag still
+      // changes status, so it must persist (its position is re-derived by the sort on reload).
+      const sameColumn = dragging.__task && dragging.__task.status === st.key;
+      if (state.sortByPriority && sameColumn) { loadTasks(); return; }
       const next = dragging.nextElementSibling;
       const beforeId = next && next.classList.contains("task-card") ? next.dataset.id : "";
       moveTask(dragging.dataset.id, st.key, beforeId);
@@ -179,6 +257,23 @@ function renderBoard() {
   tick();
 }
 
+// Board filters (category + priority). Both default to "" = no filter. A specific category hides
+// tasks with no/other label; a specific priority treats a missing one as "medium" (the default).
+function applyFilters(items) {
+  return items.filter((t) =>
+    (!state.filterLabel || (t.label || "") === state.filterLabel) &&
+    (!state.filterPriority || (t.priority || "medium") === state.filterPriority));
+}
+// Optional per-column ordering by priority (high→low). Stable: equal priority keeps the underlying
+// storage order (manual drag order), so toggling the lens off restores exactly what the user arranged.
+function orderForColumn(items) {
+  if (!state.sortByPriority) return items;
+  return items
+    .map((t, i) => [t, i])
+    .sort((a, b) => ((PRIORITY_RANK[a[0].priority] ?? 1) - (PRIORITY_RANK[b[0].priority] ?? 1)) || (a[1] - b[1]))
+    .map((pair) => pair[0]);
+}
+
 function buildCard(t) {
   const el = $("#card-tpl").content.firstElementChild.cloneNode(true);
   el.dataset.id = t.id;
@@ -187,6 +282,24 @@ function buildCard(t) {
   const projEl = $(".task-project", el);
   if (t.project) { projEl.textContent = t.project; applyProjectColor(projEl, t.project); projEl.classList.remove("hidden"); }
   $(".task-title", el).textContent = t.title;
+
+  // category + priority chips. Priority shows only for high/low — medium is the quiet default.
+  const tags = $(".task-tags", el);
+  tags.replaceChildren();
+  if (t.priority && t.priority !== "medium") {
+    const p = document.createElement("span");
+    p.className = "task-prio prio-" + t.priority;
+    p.textContent = PRIORITY_NAME[t.priority] || t.priority;
+    tags.appendChild(p);
+  }
+  if (t.label) {
+    const lab = document.createElement("span");
+    lab.className = "task-label";
+    lab.textContent = t.label;
+    applyLabelColor(lab, t.label);
+    tags.appendChild(lab);
+  }
+
   const meta = [];
   if (t.attachments && t.attachments.length) meta.push(`📎 ${t.attachments.length}`);
   if (t.notes && t.notes.length) meta.push(`📝 ${t.notes.length}`);
@@ -227,14 +340,141 @@ function buildCard(t) {
   return el;
 }
 
-// distinct project names from all tasks, for the <datalist> autocomplete everywhere
+// distinct project names — from tasks AND the /projects registry — for the <datalist> everywhere
 function updateProjectDatalist() {
   const dl = document.getElementById("task-projects");
   if (!dl) return;
-  const projects = [...new Set(state.tasks.map((t) => (t.project || "").trim()).filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b));
+  const projects = [...new Set([
+    ...state.tasks.map((t) => (t.project || "").trim()),
+    ...(state.registeredProjects || []),
+  ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
   dl.replaceChildren();
   projects.forEach((p) => { const o = document.createElement("option"); o.value = p; dl.appendChild(o); });
+}
+
+// Sync the category controls to the labels currently known: the <datalist> behind the add-modal +
+// detail inputs (pick existing or type new) and the toolbar filter <select> (preserving its choice;
+// if the filtered label vanished, fall back to "all").
+function refreshLabelControls() {
+  const labels = knownLabels();
+  const dl = document.getElementById("task-labels");
+  if (dl) {
+    dl.replaceChildren();
+    labels.forEach((l) => { const o = document.createElement("option"); o.value = l; dl.appendChild(o); });
+  }
+  const sel = $("#filter-label");
+  if (sel) {
+    const cur = state.filterLabel;
+    sel.replaceChildren();
+    const all = document.createElement("option"); all.value = ""; all.textContent = "All categories"; sel.appendChild(all);
+    labels.forEach((l) => { const o = document.createElement("option"); o.value = l; o.textContent = l; sel.appendChild(o); });
+    sel.value = labels.includes(cur) ? cur : "";
+    if (sel.value !== cur) state.filterLabel = sel.value; // the filtered label no longer exists
+    sel.classList.toggle("is-active", !!sel.value);
+  }
+}
+
+// Pull the managed project names once so they autocomplete even before any task uses them.
+async function loadRegisteredProjects() {
+  try {
+    const d = await apiGet("/api/projects");
+    state.registeredProjects = (d.projects || []).map((p) => p.name).filter(Boolean);
+  } catch (_) { state.registeredProjects = []; }
+  updateProjectDatalist();
+}
+
+/* ---------- weekly-time chip (topbar) ---------- */
+
+// Pull THIS week's totals from the same endpoint the summary modal uses (one source of truth, so the
+// chip and the modal can never disagree). Refreshed only at the post-mutation reload points via
+// loadTasks() — never per-second; tick() extrapolates the live running portion locally.
+async function loadWeekMeter() {
+  try {
+    const data = await apiGet("/api/tasks/summary?week=0");
+    const s = data.summary || {};
+    state.week = {
+      worked: s.total_seconds || 0,
+      expected: s.expected_seconds || 0,
+      short: s.short_seconds || 0,
+      fetchedAt: Date.now(),
+    };
+  } catch (_) {
+    state.week = null;
+  }
+  renderWeekMeter();
+}
+
+// Render the chip. liveWorked (optional) lets tick() show the running timer's wall-clock without refetching.
+function renderWeekMeter(liveWorked) {
+  const el = $("#week-meter");
+  if (!el) return;
+  const w = state.week;
+  if (!w) { el.replaceChildren(); el.style.removeProperty("--pct"); el.classList.remove("short"); return; }
+  const worked = (liveWorked != null) ? liveWorked : w.worked;
+  const pct = w.expected > 0 ? Math.min(100, Math.round((worked / w.expected) * 100)) : 0;
+  el.style.setProperty("--pct", pct + "%");
+  el.classList.toggle("short", w.short > 0);
+  const cal = document.createElement("span"); cal.textContent = "📅"; cal.setAttribute("aria-hidden", "true");
+  const val = document.createElement("b"); val.textContent = fmtDur(worked);
+  el.replaceChildren(cal, val);
+  if (w.expected > 0) {
+    const exp = document.createElement("span"); exp.className = "wm-exp";
+    exp.textContent = "/ " + fmtDur(w.expected).replace(/ 0m$/, "");
+    el.appendChild(exp);
+  }
+  el.title = w.short > 0
+    ? `Worked ${fmtDur(worked)} of ${fmtDur(w.expected)} this week — ${fmtDur(w.short)} under target. Click for the weekly summary (and past weeks).`
+    : `Worked ${fmtDur(worked)} this week${w.expected ? " (target " + fmtDur(w.expected).replace(/ 0m$/, "") + ")" : ""}. Click for the weekly summary (and past weeks).`;
+}
+
+/* ---------- Done/Archived time-window (this week vs. earlier) ---------- */
+
+// Monday 00:00 (local) of the current week — matches the Weekly Summary anchor and the week chip.
+function weekStart() {
+  const d = new Date();
+  const dow = (d.getDay() + 6) % 7; // 0 = Mon … 6 = Sun
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - dow);
+  return d.getTime();
+}
+
+// When a task ENTERED its current column (status_since), so editing/attaching to an old Done card
+// doesn't pull it back onto the board. Fail-open: a missing/unparseable time → Infinity → stays visible.
+function enteredAt(t) {
+  const hist = t.history || [];
+  const src = t.status_since || (hist.length ? hist[hist.length - 1].at : t.created_at);
+  const ms = Date.parse(src || "");
+  return isNaN(ms) ? Infinity : ms;
+}
+
+// The reveal/collapse row appended to a Done/Archived column when an earlier tail exists.
+function buildFoldRow(statusKey, recentCount, olderCount, showOlder) {
+  if (olderCount === 0) return null;
+  const verb = statusKey === "done" ? "finished" : "archived";
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "col-fold";
+  if (showOlder) {
+    row.classList.add("is-collapse");
+    row.textContent = "↥ Show only this week";
+  } else if (recentCount === 0) {
+    row.textContent = `Nothing ${verb} this week · show ${olderCount} earlier`;
+  } else {
+    row.textContent = `+ ${olderCount} earlier · show`;
+  }
+  row.addEventListener("click", () => toggleOlder(statusKey));
+  return row;
+}
+
+function toggleOlder(statusKey) {
+  if (statusKey === "done") {
+    state.showDoneOlder = !state.showDoneOlder;
+    localStorage.setItem("tasks.showDoneOlder", state.showDoneOlder ? "1" : "0");
+  } else {
+    state.showArchivedOlder = !state.showArchivedOlder;
+    localStorage.setItem("tasks.showArchivedOlder", state.showArchivedOlder ? "1" : "0");
+  }
+  renderBoard();
 }
 
 /* ---------- live tick ---------- */
@@ -273,8 +513,16 @@ function tick() {
     nt.classList.remove("active");
   }
   const tt = $("#today-total");
-  tt.textContent = state.todayView ? `Today worked ${fmtDur(todayTotal)} · ${todayCount} task${todayCount === 1 ? "" : "s"}` : "";
+  tt.textContent = state.todayView ? `Today ${fmtDur(todayTotal)} · ${todayCount}t` : "";
+  tt.title = state.todayView ? `Worked today across ${todayCount} task${todayCount === 1 ? "" : "s"}` : "";
   if (state.selectMode) updateSelectBar(); // keep the compare bar live (running tasks, re-renders)
+
+  // Keep the week chip live ONLY while a timer runs — extrapolate the wall-clock since it was fetched
+  // (the cached base already includes everything banked up to that fetch, so this never double-counts).
+  // When idle, the chip already shows the fetched base, so there's nothing to re-render each second.
+  if (state.week && runningTask) {
+    renderWeekMeter(state.week.worked + (Date.now() - state.week.fetchedAt) / 1000);
+  }
 
   // While its timer runs, the open detail modal's "Worked total" and today's row tick live, so
   // starting the timer visibly auto-populates today's log (banked to 15-min units on stop).
@@ -346,7 +594,7 @@ $("#add-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.target;
   try {
-    await api("/api/tasks", { title: f.title.value, description: f.description.value, project: f.project.value });
+    await api("/api/tasks", { title: f.title.value, description: f.description.value, project: f.project.value, label: f.label.value, priority: f.priority.value });
     addModal.classList.add("hidden");
     toast("ok", "Task created", f.title.value);
     loadTasks();
@@ -397,6 +645,10 @@ function renderDetail(t) {
   const projCarry = (oldProj && document.activeElement === oldProj)
     ? { value: oldProj.value, start: oldProj.selectionStart, end: oldProj.selectionEnd }
     : null;
+  const oldLabel = body.querySelector('input[list="task-labels"]');
+  const labelCarry = (oldLabel && document.activeElement === oldLabel)
+    ? { value: oldLabel.value, start: oldLabel.selectionStart, end: oldLabel.selectionEnd }
+    : null;
 
   body.innerHTML = "";
 
@@ -416,11 +668,24 @@ function renderDetail(t) {
   statusWrap.className = "detail-field-inline";
   statusWrap.append(labelSpan("Status"), statusSel);
 
+  const prioSel = document.createElement("select");
+  prioSel.className = "detail-status";
+  PRIORITIES.forEach((p) => {
+    const o = document.createElement("option");
+    o.value = p.key; o.textContent = p.name;
+    if (p.key === (t.priority || "medium")) o.selected = true;
+    prioSel.appendChild(o);
+  });
+  prioSel.addEventListener("change", () => saveTask(t.id, { priority: prioSel.value }));
+  const prioWrap = document.createElement("label");
+  prioWrap.className = "detail-field-inline";
+  prioWrap.append(labelSpan("Priority"), prioSel);
+
   const timerBtn = document.createElement("button");
   timerBtn.className = "btn-mini " + (t.running ? "is-running" : "");
   timerBtn.textContent = t.running ? "⏹ Stop timer" : "▶ Start timer";
   timerBtn.addEventListener("click", () => toggleTimer(t));
-  row.append(statusWrap, timerBtn);
+  row.append(statusWrap, prioWrap, timerBtn);
   body.appendChild(row);
 
   // project
@@ -434,6 +699,18 @@ function renderDetail(t) {
   projInput.addEventListener("change", () => saveTask(t.id, { project: projInput.value }));
   projWrap.appendChild(projInput);
   body.appendChild(projWrap);
+
+  // category (a single free-form label; pick a known one or type a new one)
+  const labelWrap = document.createElement("div");
+  labelWrap.className = "field";
+  labelWrap.append(labelSpan("Category"));
+  const labelInput = document.createElement("input");
+  labelInput.setAttribute("list", "task-labels");
+  labelInput.placeholder = "AWS Terraform, frontend, research…";
+  labelInput.value = labelCarry ? labelCarry.value : (t.label || "");
+  labelInput.addEventListener("change", () => saveTask(t.id, { label: labelInput.value }));
+  labelWrap.appendChild(labelInput);
+  body.appendChild(labelWrap);
 
   // description
   const descWrap = document.createElement("div");
@@ -518,6 +795,7 @@ function renderDetail(t) {
     if (ni) { ni.value = noteCarry.value; ni.focus(); ni.setSelectionRange(noteCarry.start, noteCarry.end); }
   }
   if (projCarry) { projInput.focus(); projInput.setSelectionRange(projCarry.start, projCarry.end); }
+  if (labelCarry) { labelInput.focus(); labelInput.setSelectionRange(labelCarry.start, labelCarry.end); }
 }
 
 function buildAttachment(taskId, a) {
@@ -670,6 +948,7 @@ async function loadSummary() {
   try {
     const data = await apiGet("/api/tasks/summary?week=" + state.weekOffset);
     renderSummary(data.summary);
+    decorateSummaryRedmine(state.weekOffset); // async, non-blocking — adds Redmine ✓/⚠ badges
   } catch (e) {
     body.textContent = "Error: " + e.message;
   }
@@ -683,6 +962,10 @@ function renderSummary(s) {
   const projectTotals = s.project_totals || [];
   const completed = s.completed || [];
 
+  // Reflect the saved daily target in the control (don't clobber it while the user is typing).
+  const tEl = $("#summary-target");
+  if (tEl && document.activeElement !== tEl) tEl.value = (s.target_hours ?? 8);
+
   // Grand total — now includes BOTH timer sessions and manually-logged time.
   const total = document.createElement("div");
   total.className = "summary-total";
@@ -690,10 +973,20 @@ function renderSummary(s) {
   big.textContent = fmtDur(s.total_seconds || 0);
   total.append(document.createTextNode("Worked "), big, document.createTextNode(` this week · ${completed.length} completed`));
   body.appendChild(total);
-  const note = document.createElement("div");
-  note.className = "summary-subnote";
-  note.textContent = "Includes timer + manually logged hours.";
-  body.appendChild(note);
+
+  // Completeness vs the daily target — the "did I log a full day?" check (for Redmine reconciliation).
+  const expected = s.expected_seconds || 0;
+  const shortSecs = s.short_seconds || 0;
+  const shortDays = days.filter((d) => d.working_day && (d.short_seconds || 0) > 0).length;
+  const dailyTarget = (s.days.find((d) => d.working_day)?.expected_seconds) || Math.round((s.target_hours || 0) * 3600);
+  const comp = document.createElement("div");
+  comp.className = "summary-subnote " + (expected > 0 && shortSecs > 0 ? "summary-short" : "summary-ok");
+  comp.textContent = expected <= 0
+    ? "Includes timer + manually logged hours."
+    : (shortSecs > 0
+        ? `⚠️ ${shortDays} day${shortDays === 1 ? "" : "s"} under the ${fmtDur(dailyTarget)}/day target — ${fmtDur(shortSecs)} missing (worked ${fmtDur(s.total_seconds || 0)} of ${fmtDur(expected)})`
+        : `✅ Every working day met the ${fmtDur(dailyTarget)}/day target`);
+  body.appendChild(comp);
 
   if (!days.length) {
     const none = document.createElement("p");
@@ -704,11 +997,13 @@ function renderSummary(s) {
   }
 
   // By project — week totals with bars (quick "what did I work on" glance).
+  if (projectTotals.length) {
   body.appendChild(sectionTitle("By project"));
   const maxP = Math.max(...projectTotals.map((p) => p.seconds), 1);
   projectTotals.forEach((p) => {
     const r = document.createElement("div");
     r.className = "sum-row sum-row-proj";
+    r.dataset.project = p.project; // so decorateSummaryRedmine can match the Redmine badge to it
     const nm = document.createElement("span"); nm.className = "sum-name"; nm.textContent = p.project;
     if (p.project && p.project !== "Other") nm.style.color = projectColor(p.project).fg;
     const bar = document.createElement("div"); bar.className = "sum-bar";
@@ -718,17 +1013,32 @@ function renderSummary(s) {
     r.append(nm, bar, val);
     body.appendChild(r);
   });
+  }
 
-  // By day — day → project → tasks, each with hours (the core breakdown).
+  // By day — day → project → tasks, each with hours; weekdays flagged ✓ / ⚠ vs the target.
   body.appendChild(sectionTitle("By day"));
   days.forEach((day) => {
     const block = document.createElement("div");
-    block.className = "sum-day";
+    block.className = "sum-day" + (day.working_day && !day.complete ? " sum-day-incomplete" : "");
 
     const head = document.createElement("div"); head.className = "sum-day-head";
     const dl = document.createElement("span"); dl.className = "sum-day-label"; dl.textContent = day.label;
     const dv = document.createElement("span"); dv.className = "sum-day-val"; dv.textContent = fmtDur(day.seconds);
-    head.append(dl, dv);
+    head.append(dl);
+    if (day.working_day && day.in_progress) {
+      const fl = document.createElement("span"); fl.className = "sum-day-flag is-weekend"; fl.textContent = "today";
+      head.append(fl);
+    } else if (day.working_day) {
+      const fl = document.createElement("span");
+      fl.className = "sum-day-flag " + (day.complete ? "is-ok" : "is-short");
+      fl.textContent = day.complete ? "✓"
+        : (day.seconds > 0 ? "⚠ " + fmtDur(day.short_seconds) + " short" : "⚠ no time logged");
+      head.append(fl);
+    } else if (day.seconds > 0) {
+      const fl = document.createElement("span"); fl.className = "sum-day-flag is-weekend"; fl.textContent = "weekend";
+      head.append(fl);
+    }
+    head.append(dv);
     block.appendChild(head);
 
     (day.projects || []).forEach((p) => {
@@ -763,11 +1073,90 @@ function renderCompletedSection(body, completed) {
   });
 }
 
-// #open-summary lives in the "More" menu now — wired in the topbar More-menu block below.
+// Decorate the weekly summary's "By project" rows with the Redmine reconciliation badge for the
+// viewed week (async, non-blocking — Redmine is an outbound call). Only ok/short/error show here;
+// projects without a URL/key or with no tracked hours stay clean (the /projects page surfaces those).
+async function decorateSummaryRedmine(offset) {
+  let data;
+  try { data = await apiGet("/api/projects/redmine-status?week=" + offset); }
+  catch (_) { return; }
+  if (offset !== state.weekOffset || summaryModal.classList.contains("hidden")) return; // week/view changed
+  const byName = {};
+  (data.projects || []).forEach((p) => { byName[p.name] = p; });
+  document.querySelectorAll("#summary-body .sum-row-proj").forEach((row) => {
+    if (row.querySelector(".rm-badge")) return; // already decorated
+    const p = byName[row.dataset.project];
+    if (!p || !["ok", "short", "error"].includes(p.status)) return;
+    const b = document.createElement("span");
+    b.className = "rm-badge rm-" + p.status;
+    if (p.status === "ok") { b.textContent = "✓ Redmine"; b.title = `Logged ${fmtH(p.redmine_hours)} in Redmine ≥ ${fmtH(p.dashboard_hours)} tracked`; }
+    else if (p.status === "short") { b.textContent = "⚠ " + fmtH(p.short_hours); b.title = `Redmine ${fmtH(p.redmine_hours)} < ${fmtH(p.dashboard_hours)} tracked — log ${fmtH(p.short_hours)} more`; }
+    else { b.textContent = "⚠ Redmine"; b.title = p.error || "Redmine error"; }
+    row.appendChild(b);
+  });
+
+  // Total hours logged to Redmine this week, summed across the reconciled (ok/short) projects.
+  // Deduped by Redmine URL so a project mapped twice can't double-count; errored/unreachable
+  // projects contribute nothing and are surfaced as a caveat rather than silently dropped.
+  const seen = new Set();
+  let totalLogged = 0, reconciled = 0, errors = 0;
+  (data.projects || []).forEach((p) => {
+    if (p.status === "error") { errors++; return; }
+    if ((p.status === "ok" || p.status === "short") && typeof p.redmine_hours === "number") {
+      const key = p.redmine_url || p.name;
+      if (seen.has(key)) return;
+      seen.add(key);
+      totalLogged += p.redmine_hours;
+      reconciled++;
+    }
+  });
+  renderRedmineTotal(totalLogged, reconciled, errors);
+}
+
+// Insert/update the "logged to Redmine this week" headline just under the completeness subnote.
+// Shown only once Redmine actually returned data for ≥1 project (reconciled or errored); otherwise
+// there's nothing meaningful to total, so no line appears.
+function renderRedmineTotal(hours, reconciled, errors) {
+  const body = $("#summary-body");
+  if (!body) return;
+  let el = body.querySelector(".summary-redmine");
+  if (reconciled === 0 && errors === 0) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "summary-redmine";
+    const anchor = body.querySelector(".summary-subnote") || body.querySelector(".summary-total");
+    if (anchor) anchor.insertAdjacentElement("afterend", el); else body.insertBefore(el, body.firstChild);
+  }
+  el.replaceChildren();
+  const icon = document.createElement("span"); icon.textContent = "📋 "; icon.setAttribute("aria-hidden", "true");
+  const strong = document.createElement("strong"); strong.textContent = fmtH(hours);
+  el.append(icon, strong, document.createTextNode(" logged to Redmine this week"));
+  if (errors > 0) {
+    const warn = document.createElement("span");
+    warn.className = "summary-redmine-warn";
+    warn.textContent = ` · ${errors} project${errors === 1 ? "" : "s"} couldn't be checked`;
+    el.appendChild(warn);
+  }
+  el.title = `Total hours logged in Redmine this week across ${reconciled} reconciled project${reconciled === 1 ? "" : "s"}`
+    + (errors > 0 ? `; ${errors} could not be checked and ${errors === 1 ? "is" : "are"} not included.` : ".");
+}
+function fmtH(h) { const n = Number(h) || 0; return n.toFixed(2).replace(/\.?0+$/, "") + "h"; }
+
+// The summary opens from the topbar week chip (#week-meter) — wired further below.
 $("#summary-close").addEventListener("click", () => summaryModal.classList.add("hidden"));
 onBackdrop(summaryModal, () => summaryModal.classList.add("hidden"));
 $("#week-prev").addEventListener("click", () => { state.weekOffset--; loadSummary(); });
 $("#week-next").addEventListener("click", () => { state.weekOffset++; loadSummary(); });
+// Post the currently-viewed week to Mattermost (reuses the check-in/out preview flow).
+$("#summary-post").addEventListener("click", () => openCheckPreview("weekly"));
+// Change the "full day" target → persist (merge-preserving) and re-evaluate the flags.
+$("#summary-target").addEventListener("change", async (ev) => {
+  const hours = parseFloat(ev.target.value);
+  if (isNaN(hours) || hours < 0 || hours > 24) { loadSummary(); return; } // snap back on bad input
+  try { await api("/api/settings", { daily_target_hours: hours }); toast("ok", "Daily target saved"); }
+  catch (e) { toast("err", e.message); }
+  loadSummary();
+});
 
 /* ---------- mattermost ---------- */
 
@@ -796,6 +1185,8 @@ function mmFormBody() {
     intake_project: f.intake_project.value.trim(),
     intake_channel: f.intake_channel.value.trim(),
     intake_llm: f.intake_llm.checked,
+    autoresponder_enabled: f.autoresponder_enabled.checked,
+    autoresponder_week_allow: f.autoresponder_week_allow.value.trim(),
   };
   if (f.token.value.trim() !== "") body.token = f.token.value.trim();
   return body;
@@ -817,6 +1208,8 @@ async function openMmSettings() {
     mmForm.intake_project.value = settings.intake_project || "";
     mmForm.intake_channel.value = settings.intake_channel || "";
     mmForm.intake_llm.checked = !!settings.intake_llm;
+    mmForm.autoresponder_enabled.checked = !!settings.autoresponder_enabled;
+    mmForm.autoresponder_week_allow.value = settings.autoresponder_week_allow || "";
     const cHint = $("#mm-claude-hint");
     if (cHint) cHint.textContent = settings.claude_available
       ? "Found your claude CLI" + (settings.claude_bin ? " (" + settings.claude_bin + ")" : "") + ". When on, Claude interprets each message; if it's ever unavailable, intake falls back to the built-in parsing."
@@ -843,7 +1236,7 @@ mmForm.addEventListener("submit", async (ev) => {
     toast("ok", "Mattermost settings saved");
     // If intake was just enabled, make sure the listener is up (it may not be if the dashboard
     // started before the feature, or it crashed). Idempotent — the daemon is a singleton.
-    if (body.intake_enabled) { try { await api("/api/mattermost/listener/start", {}); } catch (_) {} }
+    if (body.intake_enabled || body.autoresponder_enabled) { try { await api("/api/mattermost/listener/start", {}); } catch (_) {} }
     refreshListenerStatus();
   } catch (e) {
     setMmStatus("err", e.message);
@@ -857,15 +1250,20 @@ const mmDot = $("#mm-listener-dot");
 const mmListenerLine = $("#mm-listener-line");
 
 function describeListener(l) {
-  if (!l.configured) return { cls: "is-off", label: "@Claude: not configured", line: "Add a server URL and access token above, then Save." };
-  if (!l.intake_enabled) return { cls: "is-off", label: "@Claude intake: off", line: "Intake is off — tick “Enable @Claude intake” above and Save." };
+  if (!l.configured) return { cls: "is-off", label: "Mattermost: not configured", line: "Add a server URL and access token above, then Save." };
   const tag = l.intake_tag || "@Claude";
+  // The listener serves @Claude intake AND/OR the colleague auto-responder; reflect whichever is on.
+  const feats = [];
+  if (l.intake_enabled) feats.push(tag + " intake");
+  if (l.autoresponder_enabled) feats.push("auto-status");
+  if (feats.length === 0) return { cls: "is-off", label: "Mattermost listener: off", line: "Nothing enabled — tick “Enable @Claude intake” or “Auto-reply to colleagues” above and Save." };
+  const what = feats.join(" + ");
   switch (l.state) {
-    case "connected": return { cls: "is-on", label: "@Claude: watching for " + tag, line: "Connected — type " + tag + " in Mattermost and it becomes a task." };
-    case "connecting": return { cls: "is-warn", label: "@Claude: connecting…", line: "Connecting to Mattermost…" };
-    case "disabled": return { cls: "is-off", label: "@Claude intake: off", line: "Intake is off." };
-    case "error": return { cls: "is-err", label: "@Claude: connection error", line: "Error: " + (l.error || "connection failed") + " — retrying." };
-    default: return { cls: "is-err", label: "@Claude: not running", line: "Listener isn’t running — click Restart, or restart the dashboard." };
+    case "connected": return { cls: "is-on", label: what + ": watching", line: "Connected — serving " + what + "." };
+    case "connecting": return { cls: "is-warn", label: what + ": connecting…", line: "Connecting to Mattermost…" };
+    case "disabled": return { cls: "is-off", label: "Mattermost listener: off", line: "Listener is idle." };
+    case "error": return { cls: "is-err", label: "Mattermost: connection error", line: "Error: " + (l.error || "connection failed") + " — retrying." };
+    default: return { cls: "is-err", label: "Listener: not running", line: "Listener isn’t running — click Restart, or restart the dashboard." };
   }
 }
 
@@ -906,41 +1304,11 @@ $("#mm-test").addEventListener("click", async () => {
   }
 });
 
-/* ---------- "More" popover (Weekly summary + Mattermost settings) ---------- */
-const moreTrigger = $("#more-menu-trigger");
-const moreMenu = $("#more-menu");
-
-function openMoreMenu() {
-  moreMenu.classList.remove("hidden");
-  moreTrigger.setAttribute("aria-expanded", "true");
-  const first = moreMenu.querySelector(".tb-menu-item");
-  if (first) first.focus();
-}
-function closeMoreMenu(refocus) {
-  if (moreMenu.classList.contains("hidden")) return;
-  moreMenu.classList.add("hidden");
-  moreTrigger.setAttribute("aria-expanded", "false");
-  if (refocus) moreTrigger.focus();
-}
-function toggleMoreMenu() {
-  if (moreMenu.classList.contains("hidden")) openMoreMenu(); else closeMoreMenu(true);
-}
-
-moreTrigger.addEventListener("click", (ev) => { ev.stopPropagation(); toggleMoreMenu(); });
-moreMenu.addEventListener("click", (ev) => ev.stopPropagation());
-// each item runs its existing handler, then closes the menu
-$("#open-summary").addEventListener("click", () => { closeMoreMenu(false); openSummary(); });
-$("#mm-settings").addEventListener("click", () => { closeMoreMenu(false); openMmSettings(); });
-// outside-click closes (trigger/menu clicks stop propagation, so they won't self-close here)
-document.addEventListener("click", () => closeMoreMenu(false));
-// arrow-key nav + Esc while focus is inside the menu
-moreMenu.addEventListener("keydown", (ev) => {
-  const items = [...moreMenu.querySelectorAll(".tb-menu-item")];
-  const i = items.indexOf(document.activeElement);
-  if (ev.key === "Escape") { ev.preventDefault(); closeMoreMenu(true); }
-  else if (ev.key === "ArrowDown") { ev.preventDefault(); items[(i + 1) % items.length].focus(); }
-  else if (ev.key === "ArrowUp") { ev.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
-});
+/* ---------- topbar entry points (week chip → summary, gear → Mattermost settings) ---------- */
+// The old 2-item "More" popover is dissolved: weekly time is now the always-on chip, and Mattermost
+// settings is the icon-only gear — both one click, no overflow menu.
+$("#week-meter").addEventListener("click", openSummary);
+$("#mm-settings-gear").addEventListener("click", openMmSettings);
 
 $("#mm-close").addEventListener("click", () => mmModal.classList.add("hidden"));
 onBackdrop(mmModal, () => mmModal.classList.add("hidden"));
@@ -953,9 +1321,12 @@ let mmPreviewWhich = null;
 
 async function openCheckPreview(which) {
   mmPreviewWhich = which;
-  $("#mm-preview-title").textContent = which === "checkin" ? "Check in" : "Check out";
+  $("#mm-preview-title").textContent = which === "checkin" ? "Check in" : which === "weekly" ? "Weekly summary" : "Check out";
   const hoursRow = $("#mm-hours-row");
   hoursRow.classList.toggle("hidden", which !== "checkout"); // hours toggle is check-out only
+  const dayRow = $("#mm-day-row");
+  dayRow.classList.toggle("hidden", which !== "checkout"); // day picker (Today/Yesterday) is check-out only
+  if (which === "checkout") $("#mm-day").value = "0";       // default to today on each open
   $("#mm-preview-body").value = "";
   mmPreviewSend = null;
   mmPreviewModal.classList.remove("hidden");
@@ -973,10 +1344,13 @@ async function refreshPreview(includeHours) {
   try {
     const payload = { preview: true };
     if (which === "checkout" && includeHours !== null) payload.include_hours = includeHours;
+    if (which === "checkout") payload.day_offset = parseInt($("#mm-day").value, 10) || 0;
+    if (which === "weekly") payload.week_offset = state.weekOffset; // post the week the user is viewing
     const r = await api("/api/mattermost/" + which, payload);
     bodyEl.value = r.message;
     // Reflect the effective hours choice the server used (so the box matches the message shown).
     if (which === "checkout" && typeof r.include_hours === "boolean") $("#mm-include-hours").checked = r.include_hours;
+    if (which === "checkout" && typeof r.day_offset === "number") $("#mm-day").value = String(r.day_offset);
     if (r.configured) {
       $("#mm-preview-sub").textContent = "Will post to #" + r.channel + " — edit below if needed, then Send.";
       bodyEl.readOnly = false; // the operator can tweak the message before it goes out
@@ -1021,6 +1395,9 @@ function applyTodayView() {
 function applyShowAge() {
   $("#age-toggle").classList.toggle("active", state.showAge);
 }
+function applySortPriority() {
+  $("#sort-priority").classList.toggle("active", state.sortByPriority);
+}
 $("#today-view").addEventListener("click", () => {
   state.todayView = !state.todayView;
   localStorage.setItem("tasks.todayView", state.todayView ? "1" : "0");
@@ -1033,8 +1410,26 @@ $("#age-toggle").addEventListener("click", () => {
   applyShowAge();
   renderBoard(); // age text is only built into a card when the toggle is on (keeps .task-meta tidy)
 });
+$("#sort-priority").addEventListener("click", () => {
+  state.sortByPriority = !state.sortByPriority;
+  localStorage.setItem("tasks.sortByPriority", state.sortByPriority ? "1" : "0");
+  applySortPriority();
+  renderBoard(); // re-orders from already-loaded tasks (no network)
+});
+$("#filter-label").addEventListener("change", (ev) => {
+  state.filterLabel = ev.target.value;
+  ev.target.classList.toggle("is-active", !!state.filterLabel);
+  renderBoard();
+});
+$("#filter-priority").addEventListener("change", (ev) => {
+  state.filterPriority = ev.target.value;
+  ev.target.classList.toggle("is-active", !!state.filterPriority);
+  renderBoard();
+});
 // Toggling hours regenerates the message from the server (overwrites any hand-edits — expected).
 $("#mm-include-hours").addEventListener("change", (ev) => refreshPreview(ev.target.checked));
+// Switching the day rebuilds the preview for that day, keeping the current "include hours" choice.
+$("#mm-day").addEventListener("change", () => refreshPreview($("#mm-include-hours").checked));
 $("#mm-preview-send").addEventListener("click", () => { if (mmPreviewSend) mmPreviewSend(); });
 $("#mm-preview-close").addEventListener("click", () => mmPreviewModal.classList.add("hidden"));
 $("#mm-preview-cancel").addEventListener("click", () => mmPreviewModal.classList.add("hidden"));
@@ -1443,7 +1838,6 @@ function toast(kind, title, detail) {
 
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
-  closeMoreMenu(false);
   [viewer, detailModal, summaryModal, addModal, mmModal, mmPreviewModal, stModal].forEach((m) => {
     if (m === detailModal && !m.classList.contains("hidden")) closeDetail();
     else m.classList.add("hidden");
@@ -1465,9 +1859,11 @@ function isEditingText() {
   return !!(el.closest && el.closest(".day-row.editing"));
 }
 
-applyTodayView(); // honor persisted Today/age toggles before the first render
+applyTodayView(); // honor persisted Today/age/sort toggles before the first render
 applyShowAge();
+applySortPriority();
 loadTasks();
+loadRegisteredProjects(); // merge managed project names into the autocomplete
 loadScreenTime();
 refreshListenerStatus();
 setInterval(tick, 1000);

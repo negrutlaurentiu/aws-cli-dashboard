@@ -37,8 +37,10 @@ echo "  ▸ credentials file: ${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credenti
 echo "  ▸ press Ctrl+C to stop"
 echo ""
 
-# Open the browser on macOS (ignore failures / other platforms).
-if command -v open >/dev/null 2>&1; then
+# Open the browser on macOS (ignore failures / other platforms). Suppressed when
+# AWSDASH_OPEN_BROWSER=0 (the launchd auto-start agent sets this) so logging in doesn't
+# pop a tab on every restart; manual `./start.sh` keeps opening it (default 1).
+if [ "${AWSDASH_OPEN_BROWSER:-1}" = "1" ] && command -v open >/dev/null 2>&1; then
   ( sleep 1; open "$URL" >/dev/null 2>&1 || true ) &
 fi
 

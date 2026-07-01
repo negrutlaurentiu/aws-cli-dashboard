@@ -11,5 +11,7 @@
   "intake_tag": "@Claude",
   "intake_project": "",
   "intake_channel": "",
-  "intake_llm": false
+  "intake_llm": false,
+  "autoresponder_enabled": false,
+  "autoresponder_week_allow": []
 }
